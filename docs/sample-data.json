@@ -1,0 +1,46 @@
+[
+  {
+    "id": "sample-1",
+    "category": "product",
+    "title": "OpenAI launches Vision Assist on ChatGPT mobile",
+    "announcement": "OpenAI blog",
+    "url": "https://openai.com/blog",
+    "published_at": "2026-01-22",
+    "impact_score": 92,
+    "reference_count": 14,
+    "trending_score": 88
+  },
+  {
+    "id": "sample-2",
+    "category": "product",
+    "title": "Vercel ships Edge Config streaming updates",
+    "announcement": "Vercel Changelog",
+    "url": "https://vercel.com/changelog",
+    "published_at": "2026-01-21",
+    "impact_score": 78,
+    "reference_count": 8,
+    "trending_score": 72
+  },
+  {
+    "id": "sample-3",
+    "category": "research",
+    "title": "DeepMind releases new scaling law analysis",
+    "announcement": "Google DeepMind Blog",
+    "url": "https://deepmind.google/discover/blog/",
+    "published_at": "2026-01-22",
+    "impact_score": 90,
+    "reference_count": 12,
+    "trending_score": 86
+  },
+  {
+    "id": "sample-4",
+    "category": "research",
+    "title": "Papers with Code highlights multimodal agent benchmarks",
+    "announcement": "Papers with Code",
+    "url": "https://paperswithcode.com/",
+    "published_at": "2026-01-21",
+    "impact_score": 74,
+    "reference_count": 7,
+    "trending_score": 69
+  }
+]

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tech Trends Radar</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="page-bg"></div>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Daily agentic curation</p>
+        <h1>Tech Trends Radar</h1>
+        <p class="subtitle">
+          A daily, signal-first snapshot of product launches and research shifts across the AI stack.
+        </p>
+      </div>
+      <div class="meta">
+        <div class="pill">
+          <span>Last updated</span>
+          <strong id="last-updated">—</strong>
+        </div>
+        <div class="pill">
+          <span>Sources tracked</span>
+          <strong id="source-count">—</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="column" aria-labelledby="products-title">
+        <div class="column-header">
+          <h2 id="products-title">Products</h2>
+          <p>New releases, platform changes, and product-market signal.</p>
+        </div>
+        <div id="products-list" class="trend-list"></div>
+      </section>
+
+      <section class="column" aria-labelledby="research-title">
+        <div class="column-header">
+          <h2 id="research-title">Research</h2>
+          <p>Papers, infrastructure breakthroughs, and model capability shifts.</p>
+        </div>
+        <div id="research-list" class="trend-list"></div>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <a href="https://github.com/YOUR_ORG/YOUR_REPO" target="_blank" rel="noreferrer">
+        View the GitHub repo
+      </a>
+    </footer>
+
+    <template id="trend-row-template">
+      <article class="trend-row">
+        <div class="trend-main">
+          <div class="trend-title"></div>
+          <div class="trend-meta"></div>
+        </div>
+        <div class="trend-score">
+          <span class="label">Trending</span>
+          <strong class="value"></strong>
+        </div>
+      </article>
+    </template>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
