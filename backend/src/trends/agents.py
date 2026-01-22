@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import time
 from typing import List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -38,6 +40,14 @@ Summary: {summary}
     ]
 )
 
+VERBOSE = os.getenv("TRENDS_VERBOSE", "1") not in {"0", "false", "False"}
+LLM_TIMEOUT = float(os.getenv("TRENDS_LLM_TIMEOUT", "20"))
+
+
+def _log(message: str) -> None:
+    if VERBOSE:
+        print(message, flush=True)
+
 
 KEYWORD_IMPACT = {
     "launch": 12,
@@ -74,7 +84,13 @@ def _heuristic_assessment(item: SourceItem, category: Category) -> TrendAssessme
 def _build_llm() -> Optional[ChatOpenAI]:
     if not OPENAI_API_KEY:
         return None
-    return ChatOpenAI(model="gpt-4o-mini", temperature=0.2, api_key=OPENAI_API_KEY)
+    return ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        api_key=OPENAI_API_KEY,
+        request_timeout=LLM_TIMEOUT,
+        max_retries=1,
+    )
 
 
 def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI]) -> TrendAssessment:
@@ -82,13 +98,18 @@ def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI])
         return _heuristic_assessment(item, category)
 
     chain = PROMPT | llm.with_structured_output(TrendAssessment)
-    return chain.invoke(
-        {
-            "source": item.source,
-            "title": item.title,
-            "summary": item.summary or "",
-        }
-    )
+    try:
+        return chain.invoke(
+            {
+                "source": item.source,
+                "title": item.title,
+                "summary": item.summary or "",
+            }
+        )
+    except Exception as exc:
+        assessment = _heuristic_assessment(item, category)
+        assessment.rationale = f"Heuristic fallback (LLM error: {exc})."
+        return assessment
 
 
 def route_category(item: SourceItem) -> Category:
@@ -152,12 +173,16 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
     experts = build_experts()
     assessed: List[tuple[SourceItem, TrendAssessment, Category]] = []
 
-    for item in items:
+    for idx, item in enumerate(items, start=1):
         category = route_category(item)
         expert = next(
             (candidate for candidate in experts if candidate.category == category and expert_can_handle(candidate, item)),
             None,
         )
+        start = time.perf_counter()
+        _log(f"[evaluate] -> {idx}/{len(items)} {item.source}")
         assessment = assess_item(item, category, llm)
+        elapsed = time.perf_counter() - start
+        _log(f"[evaluate] <- {idx}/{len(items)} {item.source} ({elapsed:.1f}s)")
         assessed.append((item, assessment, category))
     return assessed

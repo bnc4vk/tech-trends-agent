@@ -1,4 +1,4 @@
-create table if not exists public.trends (
+create table if not exists public.tech_trends (
   id text primary key,
   category text not null,
   title text not null,
@@ -10,7 +10,7 @@ create table if not exists public.trends (
   impact_score numeric,
   reference_count integer,
   trending_score numeric,
-  references text[]
+  source_references text[]
 );
 
 create index if not exists trends_category_idx on public.trends (category);

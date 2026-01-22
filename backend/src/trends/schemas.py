@@ -34,7 +34,7 @@ class TrendItem(BaseModel):
     impact_score: float
     reference_count: int
     trending_score: float
-    references: List[str]
+    source_references: List[str]
 
 
 class GraphState(BaseModel):

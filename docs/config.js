@@ -1,7 +1,6 @@
 window.TRENDS_CONFIG = {
-  supabaseUrl: "https://YOUR_PROJECT.supabase.co",
-  supabaseAnonKey: "YOUR_SUPABASE_ANON_KEY",
-  tableName: "trends",
-  maxRows: 20,
-  fallbackDataPath: "./sample-data.json"
+  supabaseUrl: "https://upmsuqgcepaoeanexaao.supabase.co",
+  supabaseAnonKey: "sb_publishable_bc3sg7AAs4JWxvj8TyZKdw_69R6njVY",
+  tableName: "tech_trends",
+  maxRows: 20
 };

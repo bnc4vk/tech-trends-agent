@@ -11,6 +11,9 @@ from langchain_core.tools import tool
 from .schemas import SourceItem
 
 DEFAULT_TIMEOUT = 20
+DEFAULT_HEADERS = {
+    "User-Agent": "tech-trends-agent/1.0 (+https://github.com/YOUR_ORG/YOUR_REPO)"
+}
 
 
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -28,7 +31,9 @@ def _filter_recent(items: List[SourceItem], lookback_days: int) -> List[SourceIt
 
 
 def _fetch_rss(feed_url: str, source_name: str, lookback_days: int) -> List[SourceItem]:
-    feed = feedparser.parse(feed_url)
+    response = requests.get(feed_url, timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
+    response.raise_for_status()
+    feed = feedparser.parse(response.text)
     items: List[SourceItem] = []
     for entry in feed.entries:
         published = _parse_datetime(entry.get("published_parsed"))
@@ -46,7 +51,7 @@ def _fetch_rss(feed_url: str, source_name: str, lookback_days: int) -> List[Sour
 
 def _fetch_github_trending(lookback_days: int) -> List[SourceItem]:
     url = "https://github.com/trending"
-    response = requests.get(url, timeout=DEFAULT_TIMEOUT)
+    response = requests.get(url, timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
     items: List[SourceItem] = []

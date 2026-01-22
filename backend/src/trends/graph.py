@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from datetime import datetime
 from typing import List
 
@@ -14,6 +16,14 @@ from .supabase_store import upsert_trends
 from .tools import TREND_TOOLS
 
 
+VERBOSE = os.getenv("TRENDS_VERBOSE", "1") not in {"0", "false", "False"}
+
+
+def _log(message: str) -> None:
+    if VERBOSE:
+        print(message, flush=True)
+
+
 def _normalize_title(title: str) -> str:
     return "".join(ch for ch in title.lower() if ch.isalnum() or ch.isspace()).strip()
 
@@ -25,17 +35,25 @@ def _hash_id(value: str) -> str:
 def collect_sources(state: GraphState) -> GraphState:
     items: List[SourceItem] = []
     errors = list(state.errors)
+    _log(f"[collect] Starting collection from {len(TREND_TOOLS)} sources...")
     for tool in TREND_TOOLS:
         try:
+            start = time.perf_counter()
+            _log(f"[collect] -> {tool.name}")
             results = tool.invoke({"lookback_days": state.lookback_days})
             for raw in results:
                 items.append(SourceItem(**raw))
+            elapsed = time.perf_counter() - start
+            _log(f"[collect] <- {tool.name} ({len(results)} items, {elapsed:.1f}s)")
         except Exception as exc:
             errors.append(f"{tool.name}: {exc}")
+            _log(f"[collect] !! {tool.name} failed: {exc}")
+    _log(f"[collect] Done. Total items: {len(items)}")
     return state.model_copy(update={"raw_items": items, "errors": errors})
 
 
 def evaluate_sources(state: GraphState) -> GraphState:
+    _log(f"[evaluate] Scoring {len(state.raw_items)} items...")
     assessed = evaluate_items(state.raw_items)
     trends: List[TrendItem] = []
 
@@ -66,16 +84,19 @@ def evaluate_sources(state: GraphState) -> GraphState:
                 impact_score=assessment.impact_score,
                 reference_count=reference_count,
                 trending_score=trending_score,
-                references=[source.source for source in title_groups.get(key, [])],
+                source_references=[source.source for source in title_groups.get(key, [])],
             )
         )
 
+    _log(f"[evaluate] Done. Assessed trends: {len(trends)}")
     return state.model_copy(update={"assessed_items": trends})
 
 
 def store_results(state: GraphState) -> GraphState:
     if state.assessed_items:
+        _log(f"[store] Upserting {len(state.assessed_items)} trends to Supabase...")
         upsert_trends(state.assessed_items)
+        _log("[store] Upsert complete.")
     return state
 
 
@@ -97,4 +118,8 @@ def build_graph() -> StateGraph:
 def run_daily(lookback_days: int | None = None) -> GraphState:
     graph = build_graph().compile()
     state = GraphState(lookback_days=lookback_days or DEFAULT_LOOKBACK_DAYS)
-    return graph.invoke(state)
+    result = graph.invoke(state)
+    # LangGraph returns a dict, convert it back to GraphState
+    if isinstance(result, dict):
+        return GraphState(**result)
+    return result

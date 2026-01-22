@@ -59,7 +59,9 @@
   };
 
   const fetchSupabaseTrends = async () => {
-    if (!config.supabaseUrl || !config.supabaseAnonKey) return null;
+    if (!config.supabaseUrl || !config.supabaseAnonKey) {
+      throw new Error("Missing Supabase configuration: supabaseUrl and supabaseAnonKey are required");
+    }
 
     const query = new URLSearchParams({
       select: "*",
@@ -77,24 +79,28 @@
       }
     );
 
-    if (!response.ok) return null;
-    return response.json();
-  };
+    if (!response.ok) {
+      throw new Error(`Failed to fetch trends from Supabase: ${response.status} ${response.statusText}`);
+    }
 
-  const fetchFallback = async () => {
-    if (!config.fallbackDataPath) return [];
-    const response = await fetch(config.fallbackDataPath);
-    if (!response.ok) return [];
-    return response.json();
+    const items = await response.json();
+    if (!Array.isArray(items)) {
+      throw new Error("Invalid data format: expected an array from Supabase");
+    }
+
+    return items;
   };
 
   const init = async () => {
-    let items = await fetchSupabaseTrends();
-    if (!items || !Array.isArray(items)) {
-      items = await fetchFallback();
+    let items;
+    try {
+      items = await fetchSupabaseTrends();
+    } catch (error) {
+      console.error("Error fetching trends:", error);
+      throw error;
     }
 
-    items = (items || []).sort((a, b) => (b.trending_score || 0) - (a.trending_score || 0));
+    items = items.sort((a, b) => (b.trending_score || 0) - (a.trending_score || 0));
 
     const products = items.filter((item) => item.category === "product");
     const research = items.filter((item) => item.category === "research");
