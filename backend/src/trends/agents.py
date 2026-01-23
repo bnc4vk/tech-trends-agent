@@ -20,34 +20,6 @@ class DomainExpert:
     domain_description: str
 
 
-PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
-You are a domain expert evaluating a tech trend item for its likely impact and category.
-
-Categories:
-- product: launches, product updates, APIs, platforms, dev tools, pricing changes, release notes.
-- research: papers, benchmarks, datasets, preprints, model capability or methodology advances.
-- infra: compute, GPUs/accelerators, inference/serving stacks, cloud capacity, networking, MLOps.
-
-Use the category_hint as a prior, but override it if the content clearly fits another category.
-Return a concise impact_score (0-100), reference_count estimate, category, and 1-2 sentence rationale.
-""".strip(),
-        ),
-        (
-            "user",
-            """
-Source: {source}
-Title: {title}
-Summary: {summary}
-Category hint: {category_hint}
-""".strip(),
-        ),
-    ]
-)
-
 SCREEN_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
@@ -75,20 +47,6 @@ def _log(message: str) -> None:
     if TRENDS_VERBOSE:
         print(message, flush=True)
 
-
-KEYWORD_IMPACT = {
-    "launch": 12,
-    "release": 10,
-    "open source": 8,
-    "benchmark": 10,
-    "paper": 8,
-    "arxiv": 6,
-    "model": 6,
-    "inference": 6,
-    "agent": 7,
-    "changelog": 5,
-    "summit": 5,
-}
 
 RESEARCH_TOKENS = [
     "paper",
@@ -159,26 +117,6 @@ INFRA_SOURCE_TOKENS = [
 ]
 
 
-def _heuristic_assessment(item: SourceItem, category: Category) -> TrendAssessment:
-    text = f"{item.title} {item.summary or ''}".lower()
-    impact = 40.0
-    for keyword, weight in KEYWORD_IMPACT.items():
-        if keyword in text:
-            impact += weight
-    if category == "research":
-        impact += 6
-    elif category == "infra":
-        impact += 4
-    impact = min(impact, 95.0)
-    references = 1
-    return TrendAssessment(
-        impact_score=impact,
-        reference_count=references,
-        rationale="Heuristic scoring based on keyword density and category focus.",
-        category=category,
-    )
-
-
 def _build_llm() -> Optional[ChatOpenAI]:
     if not OPENAI_API_KEY:
         return None
@@ -208,24 +146,10 @@ def screen_item(item: SourceItem, llm: Optional[ChatOpenAI]) -> TrendScreen:
         return TrendScreen(keep=True, confidence=0.0, rationale=f"LLM screening error: {exc}")
 
 
-def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI]) -> TrendAssessment:
-    if llm is None:
-        return _heuristic_assessment(item, category)
-
-    chain = PROMPT | llm.with_structured_output(TrendAssessment)
-    try:
-        return chain.invoke(
-            {
-                "source": item.source,
-                "title": item.title,
-                "summary": item.summary or "",
-                "category_hint": category,
-            }
-        )
-    except Exception as exc:
-        assessment = _heuristic_assessment(item, category)
-        assessment.rationale = f"Heuristic fallback (LLM error: {exc})."
-        return assessment
+def assess_item(item: SourceItem, category: Category) -> TrendAssessment:
+    return TrendAssessment(
+        category=category,
+    )
 
 
 def route_category(item: SourceItem) -> Category:
@@ -271,16 +195,16 @@ def build_experts() -> List[DomainExpert]:
 
 
 def _evaluate_single_item(
-    item: SourceItem, idx: int, total: int, llm: Optional[ChatOpenAI]
+    item: SourceItem, idx: int, total: int
 ) -> tuple[SourceItem, TrendAssessment, Category]:
     """Evaluate a single item - designed for parallel execution."""
     category_hint = route_category(item)
     start = time.perf_counter()
-    if VERBOSE:
+    if TRENDS_VERBOSE:
         _log(f"[evaluate] -> {idx}/{total} {item.source}")
-    assessment = assess_item(item, category_hint, llm)
+    assessment = assess_item(item, category_hint)
     elapsed = time.perf_counter() - start
-    if VERBOSE:
+    if TRENDS_VERBOSE:
         _log(f"[evaluate] <- {idx}/{total} {item.source} ({elapsed:.1f}s)")
     category = assessment.category or category_hint
     return (item, assessment, category)
@@ -291,7 +215,6 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
     if not items:
         return []
     
-    llm = _build_llm()
     total = len(items)
     # Pre-allocate list to maintain order, using Optional to allow None during construction
     assessed: List[Optional[tuple[SourceItem, TrendAssessment, Category]]] = [None] * total
@@ -302,7 +225,7 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
     with ThreadPoolExecutor(max_workers=TRENDS_MAX_WORKERS) as executor:
         # Submit all tasks
         future_to_idx = {
-            executor.submit(_evaluate_single_item, item, idx + 1, total, llm): idx
+            executor.submit(_evaluate_single_item, item, idx + 1, total): idx
             for idx, item in enumerate(items)
         }
         
@@ -317,11 +240,10 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
                 if TRENDS_VERBOSE and completed % 10 == 0:
                     _log(f"[evaluate] Progress: {completed}/{total} ({completed*100//total}%)")
             except Exception as exc:
-                # Fallback to heuristic assessment on error
+                # Fallback to base assessment on error
                 item = items[idx]
                 category = route_category(item)
-                assessment = _heuristic_assessment(item, category)
-                assessment.rationale = f"Heuristic fallback (evaluation error: {exc})."
+                assessment = assess_item(item, category)
                 assessed[idx] = (item, assessment, category)
                 completed += 1
                 _log(f"[evaluate] !! Error evaluating {item.source}: {exc}")

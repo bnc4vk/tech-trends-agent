@@ -325,10 +325,7 @@ def evaluate_sources(state: GraphState) -> GraphState:
     remaining_budget = MAX_REFERENCE_LOOKUPS
     prioritized = sorted(
         assessed,
-        key=lambda x: (
-            x[1].impact_score,
-            -((datetime.utcnow() - x[0].published_at).days if x[0].published_at else 9999),
-        ),
+        key=lambda x: x[0].published_at or datetime.min,
         reverse=True,
     )
 
@@ -349,14 +346,16 @@ def evaluate_sources(state: GraphState) -> GraphState:
             remaining_budget -= 1
         except Exception as exc:
             _log(f"[evaluate] !! reference lookup failed for {item.url}: {exc}")
-            reference_cache[url_key] = max(assessment.reference_count, 0)
+            title_key = _normalize_title(item.title)
+            fallback_sources = title_groups.get(title_key, [item.source]) if title_key else [item.source]
+            reference_cache[url_key] = len(fallback_sources)
             remaining_budget -= 1
 
     for item, assessment, category in assessed:
         key = _normalize_title(item.title)
         url_key = _normalize_url(item.url)
         source_refs = title_groups.get(key, [item.source]) if key else [item.source]
-        fallback_count = max(assessment.reference_count, len(source_refs))
+        fallback_count = len(source_refs)
         reference_count = reference_cache.get(url_key, fallback_count)
         trending_score = compute_trending_score(reference_count, item.published_at)
 
@@ -370,7 +369,6 @@ def evaluate_sources(state: GraphState) -> GraphState:
                 published_at=item.published_at or datetime.utcnow(),
                 source=item.source,
                 summary=item.summary,
-                impact_score=assessment.impact_score,
                 reference_count=reference_count,
                 trending_score=trending_score,
                 source_references=source_refs,

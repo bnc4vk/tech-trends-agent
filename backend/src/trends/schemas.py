@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -19,8 +19,6 @@ class SourceItem(BaseModel):
 class SourceCandidate(BaseModel):
     title: str
     url: str
-    snippet: Optional[str] = None
-    score: Optional[float] = None
 
 
 class FeedCandidate(BaseModel):
@@ -30,9 +28,6 @@ class FeedCandidate(BaseModel):
 
 
 class TrendAssessment(BaseModel):
-    impact_score: float = Field(ge=0, le=100)
-    reference_count: int = Field(ge=0)
-    rationale: str
     category: Category = "product"
 
 
@@ -51,17 +46,9 @@ class TrendItem(BaseModel):
     published_at: Optional[datetime]
     source: str
     summary: Optional[str]
-    impact_score: float
     reference_count: int
     trending_score: float
     source_references: List[str]
-
-
-class DailyTrendRecord(BaseModel):
-    run_date: date
-    products: Dict[str, dict]
-    research: Dict[str, dict]
-    infra: Dict[str, dict]
 
 
 class GraphState(BaseModel):

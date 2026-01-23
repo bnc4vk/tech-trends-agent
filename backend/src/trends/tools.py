@@ -266,8 +266,6 @@ def _search_tavily(query: str, max_results: int, search_depth: str = "advanced")
             SourceCandidate(
                 title=item.get("title") or item.get("url", ""),
                 url=item.get("url", ""),
-                snippet=item.get("content"),
-                score=item.get("score"),
             )
         )
     return results
@@ -294,8 +292,6 @@ def _search_brave(query: str, max_results: int) -> List[SourceCandidate]:
             SourceCandidate(
                 title=item.get("title") or item.get("url", ""),
                 url=item.get("url", ""),
-                snippet=item.get("description"),
-                score=None,
             )
         )
     return results
@@ -319,8 +315,6 @@ def _search_serpapi(query: str, max_results: int) -> List[SourceCandidate]:
             SourceCandidate(
                 title=item.get("title") or item.get("link", ""),
                 url=item.get("link", ""),
-                snippet=item.get("snippet"),
-                score=None,
             )
         )
     return results
@@ -370,8 +364,6 @@ def _search_brave_references(query: str, max_results: int) -> tuple[List[SourceC
             SourceCandidate(
                 title=item.get("title") or item.get("url", ""),
                 url=item.get("url", ""),
-                snippet=item.get("description"),
-                score=None,
             )
         )
     try:
@@ -400,8 +392,6 @@ def _search_serpapi_references(query: str, max_results: int) -> tuple[List[Sourc
             SourceCandidate(
                 title=item.get("title") or item.get("link", ""),
                 url=item.get("link", ""),
-                snippet=item.get("snippet"),
-                score=None,
             )
         )
     try:
