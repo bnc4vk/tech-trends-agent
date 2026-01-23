@@ -1,32 +1,38 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import time
 from datetime import datetime, date
 from typing import List
-from urllib.parse import urldefrag
+from urllib.parse import urldefrag, urlparse
 
 from langgraph.graph import StateGraph
 
 from .agents import build_experts, evaluate_items, screen_items
-from .config import DEFAULT_LOOKBACK_DAYS, MAX_LOOKBACK_DAYS, OVERWRITE_EXECUTION, TARGET_TRENDS
+from .config import (
+    ALLOW_NON_RSS_SOURCES,
+    DEFAULT_LOOKBACK_DAYS,
+    LOOKBACK_STEP_DAYS,
+    MAX_FEEDS_PER_SOURCE,
+    MAX_ITEMS_PER_EXPERT,
+    MAX_ITEMS_PER_SOURCE,
+    MAX_LOOKBACK_DAYS,
+    MAX_REFERENCE_LOOKUPS,
+    MAX_SOURCES_PER_EXPERT,
+    MAX_TRENDS_PER_CATEGORY,
+    MIN_UNIQUE_DOMAINS,
+    OVERWRITE_EXECUTION,
+    TARGET_TRENDS,
+    TRENDS_VERBOSE,
+)
 from .schemas import GraphState, SourceItem, TrendItem
 from .scoring import compute_trending_score
 from .supabase_store import daily_record_exists, upsert_daily_record
-from .tools import count_references, discover_feeds, fetch_feed, search_sources
+from .tools import count_references, discover_feeds, fetch_feed, fetch_non_rss, search_sources
 
-
-VERBOSE = os.getenv("TRENDS_VERBOSE")
-LOOKBACK_STEP_DAYS = int(os.getenv("LOOKBACK_STEP_DAYS"))
-MAX_SOURCES_PER_EXPERT = int(os.getenv("MAX_SOURCES_PER_EXPERT"))
-MAX_FEEDS_PER_SOURCE = int(os.getenv("MAX_FEEDS_PER_SOURCE"))
-MAX_ITEMS_PER_EXPERT = int(os.getenv("MAX_ITEMS_PER_EXPERT", "30"))
-MAX_TRENDS_PER_CATEGORY = int(os.getenv("MAX_TRENDS_PER_CATEGORY", "12"))
-MAX_REFERENCE_LOOKUPS = int(os.getenv("MAX_REFERENCE_LOOKUPS", "30"))
 
 def _log(message: str) -> None:
-    if VERBOSE:
+    if TRENDS_VERBOSE:
         print(message, flush=True)
 
 
@@ -44,8 +50,95 @@ def _normalize_url(url: str) -> str:
     return trimmed
 
 
+def _source_key(url: str) -> str:
+    if not url:
+        return ""
+    domain = urlparse(url).netloc.lower()
+    return domain or url.strip().lower()
+
+
 def _hash_id(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()
+
+
+def _select_items_round_robin(
+    items_by_source: dict[str, List[SourceItem]],
+    source_order: List[str],
+    max_items: int,
+    min_unique_domains: int,
+    max_items_per_source: int,
+    seen_titles: set[str],
+    seen_urls: set[str],
+) -> List[SourceItem]:
+    if max_items <= 0:
+        return []
+    available_sources = [key for key in source_order if items_by_source.get(key)]
+    if not available_sources:
+        return []
+
+    if max_items_per_source <= 0:
+        max_items_per_source = max_items
+
+    source_indices = {key: 0 for key in available_sources}
+    selected_counts = {key: 0 for key in available_sources}
+    selected: List[SourceItem] = []
+    unique_sources: set[str] = set()
+    target_unique = min(max(min_unique_domains, 0), len(available_sources), max_items)
+
+    def next_item(source_key: str) -> SourceItem | None:
+        idx = source_indices[source_key]
+        items = items_by_source[source_key]
+        while idx < len(items):
+            item = items[idx]
+            idx += 1
+            source_indices[source_key] = idx
+            title_key = _normalize_title(item.title)
+            url_key = _normalize_url(item.url)
+            if (title_key and title_key in seen_titles) or (url_key and url_key in seen_urls):
+                continue
+            if title_key:
+                seen_titles.add(title_key)
+            if url_key:
+                seen_urls.add(url_key)
+            return item
+        return None
+
+    while len(unique_sources) < target_unique and len(selected) < max_items:
+        progress = False
+        for source_key in available_sources:
+            if len(unique_sources) >= target_unique or len(selected) >= max_items:
+                break
+            if source_key in unique_sources:
+                continue
+            if selected_counts[source_key] >= max_items_per_source:
+                continue
+            item = next_item(source_key)
+            if not item:
+                continue
+            selected.append(item)
+            selected_counts[source_key] += 1
+            unique_sources.add(source_key)
+            progress = True
+        if not progress:
+            break
+
+    while len(selected) < max_items:
+        progress = False
+        for source_key in available_sources:
+            if len(selected) >= max_items:
+                break
+            if selected_counts[source_key] >= max_items_per_source:
+                continue
+            item = next_item(source_key)
+            if not item:
+                continue
+            selected.append(item)
+            selected_counts[source_key] += 1
+            progress = True
+        if not progress:
+            break
+
+    return selected
 
 
 def collect_sources(state: GraphState) -> GraphState:
@@ -59,7 +152,10 @@ def collect_sources(state: GraphState) -> GraphState:
 
     _log(f"[collect] Starting discovery with {len(experts)} experts...")
     for expert in experts:
-        expert_items = 0
+        items_by_source: dict[str, List[SourceItem]] = {}
+        source_order: List[str] = []
+        source_seen_titles: dict[str, set[str]] = {}
+        source_seen_urls: dict[str, set[str]] = {}
         try:
             start = time.perf_counter()
             _log(f"[collect] -> search_sources ({expert.name})")
@@ -73,12 +169,35 @@ def collect_sources(state: GraphState) -> GraphState:
             _log(f"[collect] !! search_sources ({expert.name}) failed: {exc}")
             sources = []
 
+        def ingest_results(results: List[dict], source_key: str) -> None:
+            for raw in results:
+                item = SourceItem(**raw)
+                title_key = _normalize_title(item.title)
+                if title_key:
+                    title_references.setdefault(title_key, set()).add(item.source)
+                url_key = _normalize_url(item.url)
+                if (title_key and title_key in source_seen_titles[source_key]) or (
+                    url_key and url_key in source_seen_urls[source_key]
+                ):
+                    continue
+                if title_key:
+                    source_seen_titles[source_key].add(title_key)
+                if url_key:
+                    source_seen_urls[source_key].add(url_key)
+                items_by_source[source_key].append(item)
+
         for candidate in sources:
-            if expert_items >= MAX_ITEMS_PER_EXPERT:
-                break
             source_url = candidate.get("url")
             if not source_url:
                 continue
+            source_key = _source_key(source_url)
+            if not source_key:
+                continue
+            if source_key not in items_by_source:
+                items_by_source[source_key] = []
+                source_order.append(source_key)
+                source_seen_titles[source_key] = set()
+                source_seen_urls[source_key] = set()
             try:
                 feeds = discover_feeds.invoke({"source_url": source_url, "max_feeds": MAX_FEEDS_PER_SOURCE})
                 if not feeds:
@@ -89,10 +208,8 @@ def collect_sources(state: GraphState) -> GraphState:
                 continue
 
             feed_count = 0
-            item_count_before = len(items)
+            item_count_before = len(items_by_source[source_key])
             for feed in feeds:
-                if expert_items >= MAX_ITEMS_PER_EXPERT:
-                    break
                 feed_url = feed.get("feed_url")
                 if not feed_url or feed_url in feed_urls:
                     continue
@@ -106,31 +223,45 @@ def collect_sources(state: GraphState) -> GraphState:
                         }
                     )
                     feed_count += 1
-                    for raw in results:
-                        item = SourceItem(**raw)
-                        title_key = _normalize_title(item.title)
-                        if title_key:
-                            title_references.setdefault(title_key, set()).add(item.source)
-                        url_key = _normalize_url(item.url)
-                        if (title_key and title_key in seen_titles) or (url_key and url_key in seen_urls):
-                            continue
-                        if title_key:
-                            seen_titles.add(title_key)
-                        if url_key:
-                            seen_urls.add(url_key)
-                        items.append(item)
-                        expert_items += 1
-                        if expert_items >= MAX_ITEMS_PER_EXPERT:
-                            break
+                    ingest_results(results, source_key)
                 except Exception as exc:
                     errors.append(f"fetch_feed/{feed_url}: {exc}")
                     _log(f"[collect] !! fetch_feed failed for {feed_url}: {exc}")
-            
-            items_added = len(items) - item_count_before
+
+            if feed_count == 0 and ALLOW_NON_RSS_SOURCES:
+                try:
+                    results = fetch_non_rss.invoke(
+                        {
+                            "source_url": source_url,
+                            "lookback_days": state.lookback_days,
+                            "source_name": candidate.get("title"),
+                            "max_items": max(MAX_ITEMS_PER_SOURCE, 1),
+                        }
+                    )
+                    if results:
+                        _log(f"[collect] Fallback non-RSS items for {source_url}: {len(results)}")
+                    ingest_results(results, source_key)
+                except Exception as exc:
+                    errors.append(f"fetch_non_rss/{source_url}: {exc}")
+                    _log(f"[collect] !! fetch_non_rss failed for {source_url}: {exc}")
+
+            items_added = len(items_by_source[source_key]) - item_count_before
             if feed_count > 0 and items_added == 0:
-                _log(f"[collect] Found {feed_count} feed(s) for {source_url} but 0 items within {state.lookback_days} day lookback")
-        if expert_items >= MAX_ITEMS_PER_EXPERT:
-            _log(f"[collect] {expert.name} reached {MAX_ITEMS_PER_EXPERT} items; stopping early.")
+                _log(
+                    f"[collect] Found {feed_count} feed(s) for {source_url} but 0 items within {state.lookback_days} day lookback"
+                )
+
+        selected = _select_items_round_robin(
+            items_by_source,
+            source_order,
+            MAX_ITEMS_PER_EXPERT,
+            MIN_UNIQUE_DOMAINS,
+            MAX_ITEMS_PER_SOURCE,
+            seen_titles,
+            seen_urls,
+        )
+        items.extend(selected)
+        _log(f"[collect] {expert.name} selected {len(selected)} items from {len(source_order)} sources.")
 
     _log(f"[collect] Done. Total items: {len(items)}")
     serialized_refs = {key: sorted(list(values)) for key, values in title_references.items()}

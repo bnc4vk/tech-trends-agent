@@ -2,14 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import os
 import time
 from typing import List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from .config import OPENAI_API_KEY
+from .config import OPENAI_API_KEY, TRENDS_LLM_TIMEOUT, TRENDS_MAX_WORKERS, TRENDS_VERBOSE
 from .schemas import Category, SourceItem, TrendAssessment, TrendScreen
 
 
@@ -72,13 +71,8 @@ URL: {url}
     ]
 )
 
-VERBOSE = os.getenv("TRENDS_VERBOSE", "1")
-LLM_TIMEOUT = float(os.getenv("TRENDS_LLM_TIMEOUT"))
-MAX_WORKERS = int(os.getenv("TRENDS_MAX_WORKERS"))
-
-
 def _log(message: str) -> None:
-    if VERBOSE:
+    if TRENDS_VERBOSE:
         print(message, flush=True)
 
 
@@ -192,7 +186,7 @@ def _build_llm() -> Optional[ChatOpenAI]:
         model="gpt-4o-mini",
         temperature=0.2,
         api_key=OPENAI_API_KEY,
-        request_timeout=LLM_TIMEOUT,
+        request_timeout=TRENDS_LLM_TIMEOUT,
         max_retries=1,
     )
 
@@ -302,10 +296,10 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
     # Pre-allocate list to maintain order, using Optional to allow None during construction
     assessed: List[Optional[tuple[SourceItem, TrendAssessment, Category]]] = [None] * total
     
-    _log(f"[evaluate] Processing {total} items with {MAX_WORKERS} workers...")
+    _log(f"[evaluate] Processing {total} items with {TRENDS_MAX_WORKERS} workers...")
     start_time = time.perf_counter()
     
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=TRENDS_MAX_WORKERS) as executor:
         # Submit all tasks
         future_to_idx = {
             executor.submit(_evaluate_single_item, item, idx + 1, total, llm): idx
@@ -320,7 +314,7 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
                 result = future.result()
                 assessed[idx] = result
                 completed += 1
-                if VERBOSE and completed % 10 == 0:
+                if TRENDS_VERBOSE and completed % 10 == 0:
                     _log(f"[evaluate] Progress: {completed}/{total} ({completed*100//total}%)")
             except Exception as exc:
                 # Fallback to heuristic assessment on error
@@ -350,10 +344,10 @@ def screen_items(items: List[SourceItem]) -> List[SourceItem]:
         return items
     total = len(items)
     screened: List[Optional[SourceItem]] = [None] * total
-    _log(f"[screen] Screening {total} items with {MAX_WORKERS} workers...")
+    _log(f"[screen] Screening {total} items with {TRENDS_MAX_WORKERS} workers...")
     start_time = time.perf_counter()
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=TRENDS_MAX_WORKERS) as executor:
         future_to_idx = {
             executor.submit(screen_item, item, llm): idx for idx, item in enumerate(items)
         }
@@ -365,14 +359,14 @@ def screen_items(items: List[SourceItem]) -> List[SourceItem]:
                 decision = future.result()
                 if decision.keep:
                     screened[idx] = item
-                elif VERBOSE:
+                elif TRENDS_VERBOSE:
                     _log(f"[screen] Discarded: {item.source} - {item.title} ({decision.rationale})")
                 completed += 1
             except Exception as exc:
                 screened[idx] = item
                 completed += 1
                 _log(f"[screen] !! Error screening {item.source}: {exc}")
-            if VERBOSE and completed % 10 == 0:
+            if TRENDS_VERBOSE and completed % 10 == 0:
                 _log(f"[screen] Progress: {completed}/{total} ({completed*100//total}%)")
 
     elapsed = time.perf_counter() - start_time

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import json
-import os
+import re
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -11,6 +11,16 @@ import requests
 from bs4 import BeautifulSoup
 from langchain_core.tools import tool
 
+from .config import (
+    BRAVE_SEARCH_API_KEY,
+    REFERENCE_SEARCH_DEPTH,
+    REFERENCE_SEARCH_MAX_RESULTS,
+    SEARCH_MAX_QUERY_CHARS,
+    SEARCH_MAX_RESULTS,
+    SEARCH_PROVIDER,
+    SERPAPI_API_KEY,
+    TAVILY_API_KEY,
+)
 from .schemas import FeedCandidate, SourceCandidate, SourceItem
 
 DEFAULT_TIMEOUT = 20
@@ -22,15 +32,6 @@ DEFAULT_HEADERS = {
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
 }
-SEARCH_PROVIDER = os.getenv("SEARCH_PROVIDER")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
-SEARCH_MAX_RESULTS = int(os.getenv("SEARCH_MAX_RESULTS"))
-SEARCH_MAX_QUERY_CHARS = int(os.getenv("SEARCH_MAX_QUERY_CHARS"))
-REFERENCE_SEARCH_MAX_RESULTS = int(os.getenv("REFERENCE_SEARCH_MAX_RESULTS", "8"))
-REFERENCE_SEARCH_DEPTH = os.getenv("REFERENCE_SEARCH_DEPTH", "basic")
-
 FEED_HINTS = [
     "feed",
     "rss",
@@ -41,6 +42,29 @@ FEED_HINTS = [
     "blog/rss.xml",
     "blog/feed.xml",
 ]
+
+NON_RSS_CLASS_HINTS = [
+    "post",
+    "entry",
+    "article",
+    "story",
+    "card",
+    "news",
+    "item",
+    "blog",
+]
+
+DATE_FORMATS = [
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%Y.%m.%d",
+    "%b %d, %Y",
+    "%B %d, %Y",
+    "%d %b %Y",
+    "%d %B %Y",
+]
+
+URL_DATE_RE = re.compile(r"/(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?:/|$)")
 
 
 def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -61,9 +85,143 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_date_value(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    parsed = _parse_iso_datetime(cleaned)
+    if parsed:
+        return parsed
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(cleaned, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date_from_url(url: str) -> Optional[datetime]:
+    if not url:
+        return None
+    match = URL_DATE_RE.search(url)
+    if not match:
+        return None
+    try:
+        year, month, day = (int(part) for part in match.groups())
+        return datetime(year, month, day)
+    except ValueError:
+        return None
+
+
 def _filter_recent(items: List[SourceItem], lookback_days: int) -> List[SourceItem]:
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     return [item for item in items if not item.published_at or item.published_at >= cutoff]
+
+
+def _filter_recent_strict(items: List[SourceItem], lookback_days: int) -> List[SourceItem]:
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    return [item for item in items if item.published_at and item.published_at >= cutoff]
+
+
+def _has_class_hint(value: Optional[str | list]) -> bool:
+    if not value:
+        return False
+    if isinstance(value, (list, tuple)):
+        text = " ".join(value)
+    else:
+        text = str(value)
+    text = text.lower()
+    return any(token in text for token in NON_RSS_CLASS_HINTS)
+
+
+def _extract_date_from_node(node: BeautifulSoup) -> Optional[datetime]:
+    time_tag = node.find("time")
+    if time_tag:
+        for attr in ("datetime", "content"):
+            parsed = _parse_date_value(time_tag.get(attr))
+            if parsed:
+                return parsed
+        parsed = _parse_date_value(time_tag.get_text(" ", strip=True))
+        if parsed:
+            return parsed
+    return None
+
+
+def _extract_summary(node: BeautifulSoup) -> Optional[str]:
+    summary_tag = node.find("p")
+    if not summary_tag:
+        return None
+    text = summary_tag.get_text(" ", strip=True)
+    if not text:
+        return None
+    return text[:280]
+
+
+def _extract_non_rss_items(
+    html: str, base_url: str, source_name: str, max_items: int
+) -> List[SourceItem]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: List[SourceItem] = []
+    seen_urls: set[str] = set()
+
+    def add_candidate(title: str, url: str, published_at: Optional[datetime], summary: Optional[str]) -> None:
+        if not title or not url or url in seen_urls or not published_at:
+            return
+        seen_urls.add(url)
+        candidates.append(
+            SourceItem(
+                title=title,
+                url=url,
+                published_at=published_at,
+                source=source_name,
+                summary=summary,
+            )
+        )
+
+    nodes = soup.find_all("article")
+    if not nodes:
+        nodes = soup.find_all(["div", "li", "section"], class_=_has_class_hint)
+
+    for node in nodes:
+        if len(candidates) >= max_items:
+            break
+        link = node.find("a", href=True)
+        if not link:
+            continue
+        href = link.get("href")
+        if not href or href.startswith("#") or href.startswith("mailto:") or "javascript:" in href:
+            continue
+        url = urljoin(base_url, href)
+        title_tag = node.find(["h1", "h2", "h3"])
+        title = (
+            title_tag.get_text(" ", strip=True)
+            if title_tag and title_tag.get_text(strip=True)
+            else link.get_text(" ", strip=True)
+        )
+        if not title:
+            continue
+        published_at = _extract_date_from_node(node) or _parse_date_from_url(url)
+        summary = _extract_summary(node)
+        add_candidate(title, url, published_at, summary)
+
+    if not candidates:
+        links = soup.select("main h2 a, main h3 a, article h2 a, article h3 a")
+        for link in links:
+            if len(candidates) >= max_items:
+                break
+            href = link.get("href")
+            if not href or href.startswith("#") or href.startswith("mailto:") or "javascript:" in href:
+                continue
+            url = urljoin(base_url, href)
+            title = link.get_text(" ", strip=True)
+            if not title:
+                continue
+            published_at = _parse_date_from_url(url)
+            add_candidate(title, url, published_at, None)
+
+    return candidates
 
 
 def _truncate_query(query: str) -> str:
@@ -401,6 +559,22 @@ def discover_feeds(source_url: str, max_feeds: int = 3) -> List[dict]:
 def standardize_source(source_url: str, max_feeds: int = 3) -> List[dict]:
     """Convert a source into standardized feed endpoints (RSS/Atom/JSON)."""
     return [feed.model_dump() for feed in _discover_feeds_impl(source_url, max_feeds)]
+
+
+@tool
+def fetch_non_rss(
+    source_url: str,
+    lookback_days: int = 2,
+    source_name: Optional[str] = None,
+    max_items: int = 20,
+) -> List[dict]:
+    """Fetch recent posts from a non-RSS source page using HTML heuristics."""
+    if not source_url:
+        return []
+    response = requests.get(source_url, timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
+    response.raise_for_status()
+    items = _extract_non_rss_items(response.text, source_url, source_name or source_url, max_items)
+    return [item.model_dump() for item in _filter_recent_strict(items, lookback_days)]
 
 
 @tool
