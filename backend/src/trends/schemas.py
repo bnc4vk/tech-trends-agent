@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import List, Literal, Optional
+from datetime import date, datetime
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-Category = Literal["product", "research"]
+Category = Literal["product", "research", "infra"]
 
 
 class SourceItem(BaseModel):
@@ -16,10 +16,24 @@ class SourceItem(BaseModel):
     summary: Optional[str] = None
 
 
+class SourceCandidate(BaseModel):
+    title: str
+    url: str
+    snippet: Optional[str] = None
+    score: Optional[float] = None
+
+
+class FeedCandidate(BaseModel):
+    feed_url: str
+    feed_type: str
+    title: Optional[str] = None
+
+
 class TrendAssessment(BaseModel):
     impact_score: float = Field(ge=0, le=100)
     reference_count: int = Field(ge=0)
     rationale: str
+    category: Category = "product"
 
 
 class TrendItem(BaseModel):
@@ -37,8 +51,19 @@ class TrendItem(BaseModel):
     source_references: List[str]
 
 
+class DailyTrendRecord(BaseModel):
+    run_date: date
+    products: Dict[str, dict]
+    research: Dict[str, dict]
+    infra: Dict[str, dict]
+
+
 class GraphState(BaseModel):
-    lookback_days: int = 2
+    run_date: Optional[str] = None
+    lookback_days: int = 3
+    target_trend_count: int = 20
+    max_lookback_days: int = 14
+    lookback_history: List[int] = Field(default_factory=list)
     raw_items: List[SourceItem] = Field(default_factory=list)
     assessed_items: List[TrendItem] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)

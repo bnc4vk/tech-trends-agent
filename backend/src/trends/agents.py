@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import os
 import time
@@ -17,7 +18,7 @@ class DomainExpert:
     name: str
     category: Category
     description: str
-    source_allowlist: Optional[List[str]] = None
+    domain_description: str
 
 
 PROMPT = ChatPromptTemplate.from_messages(
@@ -25,8 +26,15 @@ PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-You are a domain expert evaluating a tech trend item for its likely impact.
-Return a concise impact_score (0-100), reference_count estimate, and 1-2 sentence rationale.
+You are a domain expert evaluating a tech trend item for its likely impact and category.
+
+Categories:
+- product: launches, product updates, APIs, platforms, dev tools, pricing changes, release notes.
+- research: papers, benchmarks, datasets, preprints, model capability or methodology advances.
+- infra: compute, GPUs/accelerators, inference/serving stacks, cloud capacity, networking, MLOps.
+
+Use the category_hint as a prior, but override it if the content clearly fits another category.
+Return a concise impact_score (0-100), reference_count estimate, category, and 1-2 sentence rationale.
 """.strip(),
         ),
         (
@@ -35,13 +43,15 @@ Return a concise impact_score (0-100), reference_count estimate, and 1-2 sentenc
 Source: {source}
 Title: {title}
 Summary: {summary}
+Category hint: {category_hint}
 """.strip(),
         ),
     ]
 )
 
-VERBOSE = os.getenv("TRENDS_VERBOSE", "1") not in {"0", "false", "False"}
-LLM_TIMEOUT = float(os.getenv("TRENDS_LLM_TIMEOUT", "20"))
+VERBOSE = os.getenv("TRENDS_VERBOSE", "1")
+LLM_TIMEOUT = float(os.getenv("TRENDS_LLM_TIMEOUT"))
+MAX_WORKERS = int(os.getenv("TRENDS_MAX_WORKERS"))
 
 
 def _log(message: str) -> None:
@@ -63,6 +73,74 @@ KEYWORD_IMPACT = {
     "summit": 5,
 }
 
+RESEARCH_TOKENS = [
+    "paper",
+    "arxiv",
+    "preprint",
+    "benchmark",
+    "dataset",
+    "theorem",
+    "sota",
+    "state of the art",
+    "ablation",
+    "conference",
+]
+
+INFRA_TOKENS = [
+    "gpu",
+    "gpus",
+    "cuda",
+    "nvlink",
+    "nccl",
+    "tpu",
+    "accelerator",
+    "inference",
+    "serving",
+    "deployment",
+    "kubernetes",
+    "k8s",
+    "datacenter",
+    "data center",
+    "cluster",
+    "bandwidth",
+    "throughput",
+    "latency",
+    "mlops",
+    "infrastructure",
+    "infra",
+    "vector database",
+    "vector db",
+]
+
+RESEARCH_SOURCE_TOKENS = [
+    "arxiv sanity",
+    "papers with code",
+    "hugging face daily papers",
+    "openreview",
+    "deepmind blog",
+]
+
+INFRA_SOURCE_TOKENS = [
+    "semianalysis",
+    "nvidia",
+    "amd",
+    "intel",
+    "coreweave",
+    "lambda",
+    "runpod",
+    "together",
+    "modal",
+    "groq",
+    "tenstorrent",
+    "cerebras",
+    "graphcore",
+    "sambanova",
+    "aws",
+    "azure",
+    "google cloud",
+    "gcp",
+]
+
 
 def _heuristic_assessment(item: SourceItem, category: Category) -> TrendAssessment:
     text = f"{item.title} {item.summary or ''}".lower()
@@ -72,12 +150,15 @@ def _heuristic_assessment(item: SourceItem, category: Category) -> TrendAssessme
             impact += weight
     if category == "research":
         impact += 6
+    elif category == "infra":
+        impact += 4
     impact = min(impact, 95.0)
     references = 1
     return TrendAssessment(
         impact_score=impact,
         reference_count=references,
         rationale="Heuristic scoring based on keyword density and category focus.",
+        category=category,
     )
 
 
@@ -104,6 +185,7 @@ def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI])
                 "source": item.source,
                 "title": item.title,
                 "summary": item.summary or "",
+                "category_hint": category,
             }
         )
     except Exception as exc:
@@ -114,15 +196,11 @@ def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI])
 
 def route_category(item: SourceItem) -> Category:
     text = f"{item.title} {item.summary or ''}".lower()
-    if any(token in text for token in ["paper", "arxiv", "benchmark", "dataset", "theorem"]):
+    source = item.source.lower()
+    if any(token in text for token in RESEARCH_TOKENS) or any(token in source for token in RESEARCH_SOURCE_TOKENS):
         return "research"
-    if item.source.lower() in [
-        "arxiv sanity",
-        "papers with code",
-        "hugging face daily papers",
-        "google deepmind blog",
-    ]:
-        return "research"
+    if any(token in text for token in INFRA_TOKENS) or any(token in source for token in INFRA_SOURCE_TOKENS):
+        return "infra"
     return "product"
 
 
@@ -132,57 +210,93 @@ def build_experts() -> List[DomainExpert]:
             name="Product Scout",
             category="product",
             description="Tracks product launches, changelogs, and platform upgrades.",
-            source_allowlist=[
-                "Ben's Bites",
-                "GitHub Release Radar",
-                "Vercel Changelog",
-                "Deno Changelog",
-                "Supabase Changelog",
-                "OpenAI Blog",
-                "Anthropic Blog",
-            ],
+            domain_description=(
+                "AI product launches, developer tools, platform releases, changelogs, "
+                "official product blogs with RSS feeds, tech newsletters, API announcements"
+            ),
         ),
         DomainExpert(
             name="Research Analyst",
             category="research",
             description="Evaluates papers, benchmarks, and model capability shifts.",
-            source_allowlist=[
-                "arXiv Sanity",
-                "Papers with Code",
-                "Hugging Face Daily Papers",
-                "Google DeepMind Blog",
-            ],
+            domain_description=(
+                "ML AI research papers, arXiv preprints, benchmarks, datasets, model releases, "
+                "academic lab blogs with RSS feeds, research newsletters, conference proceedings"
+            ),
         ),
         DomainExpert(
             name="Infra Strategist",
-            category="product",
-            description="Assesses infra and compute landscape movements.",
-            source_allowlist=["SemiAnalysis", "Latent Space", "Stratechery"],
+            category="infra",
+            description="Assesses infra, compute, and deployment stack shifts.",
+            domain_description=(
+                "AI infrastructure, GPUs, accelerators, inference/serving stacks, model hosting, "
+                "cloud compute, vector databases, MLOps, infra vendor blogs with RSS feeds"
+            ),
         ),
     ]
 
 
-def expert_can_handle(expert: DomainExpert, item: SourceItem) -> bool:
-    if not expert.source_allowlist:
-        return True
-    return item.source in expert.source_allowlist
+def _evaluate_single_item(
+    item: SourceItem, idx: int, total: int, llm: Optional[ChatOpenAI]
+) -> tuple[SourceItem, TrendAssessment, Category]:
+    """Evaluate a single item - designed for parallel execution."""
+    category_hint = route_category(item)
+    start = time.perf_counter()
+    if VERBOSE:
+        _log(f"[evaluate] -> {idx}/{total} {item.source}")
+    assessment = assess_item(item, category_hint, llm)
+    elapsed = time.perf_counter() - start
+    if VERBOSE:
+        _log(f"[evaluate] <- {idx}/{total} {item.source} ({elapsed:.1f}s)")
+    category = assessment.category or category_hint
+    return (item, assessment, category)
 
 
 def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAssessment, Category]]:
+    """Evaluate items in parallel using ThreadPoolExecutor."""
+    if not items:
+        return []
+    
     llm = _build_llm()
-    experts = build_experts()
-    assessed: List[tuple[SourceItem, TrendAssessment, Category]] = []
-
-    for idx, item in enumerate(items, start=1):
-        category = route_category(item)
-        expert = next(
-            (candidate for candidate in experts if candidate.category == category and expert_can_handle(candidate, item)),
-            None,
-        )
-        start = time.perf_counter()
-        _log(f"[evaluate] -> {idx}/{len(items)} {item.source}")
-        assessment = assess_item(item, category, llm)
-        elapsed = time.perf_counter() - start
-        _log(f"[evaluate] <- {idx}/{len(items)} {item.source} ({elapsed:.1f}s)")
-        assessed.append((item, assessment, category))
-    return assessed
+    total = len(items)
+    # Pre-allocate list to maintain order, using Optional to allow None during construction
+    assessed: List[Optional[tuple[SourceItem, TrendAssessment, Category]]] = [None] * total
+    
+    _log(f"[evaluate] Processing {total} items with {MAX_WORKERS} workers...")
+    start_time = time.perf_counter()
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Submit all tasks
+        future_to_idx = {
+            executor.submit(_evaluate_single_item, item, idx + 1, total, llm): idx
+            for idx, item in enumerate(items)
+        }
+        
+        # Collect results as they complete
+        completed = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                result = future.result()
+                assessed[idx] = result
+                completed += 1
+                if VERBOSE and completed % 10 == 0:
+                    _log(f"[evaluate] Progress: {completed}/{total} ({completed*100//total}%)")
+            except Exception as exc:
+                # Fallback to heuristic assessment on error
+                item = items[idx]
+                category = route_category(item)
+                assessment = _heuristic_assessment(item, category)
+                assessment.rationale = f"Heuristic fallback (evaluation error: {exc})."
+                assessed[idx] = (item, assessment, category)
+                completed += 1
+                _log(f"[evaluate] !! Error evaluating {item.source}: {exc}")
+    
+    elapsed = time.perf_counter() - start_time
+    _log(f"[evaluate] Completed {total} items in {elapsed:.1f}s ({total/elapsed:.1f} items/sec)")
+    
+    # Filter out any None values (shouldn't happen, but safety check)
+    result: List[tuple[SourceItem, TrendAssessment, Category]] = [
+        r for r in assessed if r is not None
+    ]
+    return result

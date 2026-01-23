@@ -10,11 +10,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` file using `.env.example` as a template.
+Create a `.env` file using `.env.example` as a template. Configure a search provider (Tavily, Brave, or SerpAPI) to enable dynamic source discovery.
 
 ## Supabase
 
-Run the schema in `supabase.sql` in your Supabase SQL editor.
+Run the schema in `supabase.sql` in your Supabase SQL editor. This creates the `tech_trends` table (daily rollups with products, research, and infra buckets).
 
 ## Run the daily pipeline
 

@@ -18,4 +18,4 @@ See `backend/README.md` for setup instructions.
 
 1. LangGraph agents collect and assess trends.
 2. Results are stored in Supabase.
-3. The static front-end fetches data from Supabase and renders the two-column layout.
+3. The static front-end fetches data from Supabase and renders the three-column layout.
