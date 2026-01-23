@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 from .config import OPENAI_API_KEY
-from .schemas import Category, SourceItem, TrendAssessment
+from .schemas import Category, SourceItem, TrendAssessment, TrendScreen
 
 
 @dataclass
@@ -44,6 +44,29 @@ Source: {source}
 Title: {title}
 Summary: {summary}
 Category hint: {category_hint}
+""".strip(),
+        ),
+    ]
+)
+
+SCREEN_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+You are a general-purpose reader assessing whether an item represents a meaningful tech trend.
+Keep items that describe real developments, launches, research advances, or infra shifts.
+Discard items that are minor edits, change logs without substance, wiki/diff noise, spam, or off-topic posts.
+Return a keep decision, confidence (0-1), and a brief rationale.
+""".strip(),
+        ),
+        (
+            "user",
+            """
+Source: {source}
+Title: {title}
+Summary: {summary}
+URL: {url}
 """.strip(),
         ),
     ]
@@ -174,6 +197,23 @@ def _build_llm() -> Optional[ChatOpenAI]:
     )
 
 
+def screen_item(item: SourceItem, llm: Optional[ChatOpenAI]) -> TrendScreen:
+    if llm is None:
+        return TrendScreen(keep=True, confidence=0.0, rationale="No LLM configured; default keep.")
+    chain = SCREEN_PROMPT | llm.with_structured_output(TrendScreen)
+    try:
+        return chain.invoke(
+            {
+                "source": item.source,
+                "title": item.title,
+                "summary": item.summary or "",
+                "url": item.url,
+            }
+        )
+    except Exception as exc:
+        return TrendScreen(keep=True, confidence=0.0, rationale=f"LLM screening error: {exc}")
+
+
 def assess_item(item: SourceItem, category: Category, llm: Optional[ChatOpenAI]) -> TrendAssessment:
     if llm is None:
         return _heuristic_assessment(item, category)
@@ -300,3 +340,42 @@ def evaluate_items(items: List[SourceItem]) -> List[tuple[SourceItem, TrendAsses
         r for r in assessed if r is not None
     ]
     return result
+
+
+def screen_items(items: List[SourceItem]) -> List[SourceItem]:
+    if not items:
+        return []
+    llm = _build_llm()
+    if llm is None:
+        return items
+    total = len(items)
+    screened: List[Optional[SourceItem]] = [None] * total
+    _log(f"[screen] Screening {total} items with {MAX_WORKERS} workers...")
+    start_time = time.perf_counter()
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_idx = {
+            executor.submit(screen_item, item, llm): idx for idx, item in enumerate(items)
+        }
+        completed = 0
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            item = items[idx]
+            try:
+                decision = future.result()
+                if decision.keep:
+                    screened[idx] = item
+                elif VERBOSE:
+                    _log(f"[screen] Discarded: {item.source} - {item.title} ({decision.rationale})")
+                completed += 1
+            except Exception as exc:
+                screened[idx] = item
+                completed += 1
+                _log(f"[screen] !! Error screening {item.source}: {exc}")
+            if VERBOSE and completed % 10 == 0:
+                _log(f"[screen] Progress: {completed}/{total} ({completed*100//total}%)")
+
+    elapsed = time.perf_counter() - start_time
+    kept = [item for item in screened if item is not None]
+    _log(f"[screen] Kept {len(kept)}/{total} items in {elapsed:.1f}s")
+    return kept

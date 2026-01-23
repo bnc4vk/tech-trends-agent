@@ -36,6 +36,12 @@ class TrendAssessment(BaseModel):
     category: Category = "product"
 
 
+class TrendScreen(BaseModel):
+    keep: bool
+    rationale: str
+    confidence: float = Field(ge=0, le=1)
+
+
 class TrendItem(BaseModel):
     id: str
     category: Category
@@ -66,4 +72,5 @@ class GraphState(BaseModel):
     lookback_history: List[int] = Field(default_factory=list)
     raw_items: List[SourceItem] = Field(default_factory=list)
     assessed_items: List[TrendItem] = Field(default_factory=list)
+    title_references: Dict[str, List[str]] = Field(default_factory=dict)
     errors: List[str] = Field(default_factory=list)

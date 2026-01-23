@@ -28,6 +28,8 @@ BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
 SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
 SEARCH_MAX_RESULTS = int(os.getenv("SEARCH_MAX_RESULTS"))
 SEARCH_MAX_QUERY_CHARS = int(os.getenv("SEARCH_MAX_QUERY_CHARS"))
+REFERENCE_SEARCH_MAX_RESULTS = int(os.getenv("REFERENCE_SEARCH_MAX_RESULTS", "8"))
+REFERENCE_SEARCH_DEPTH = os.getenv("REFERENCE_SEARCH_DEPTH", "basic")
 
 FEED_HINTS = [
     "feed",
@@ -50,6 +52,15 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _filter_recent(items: List[SourceItem], lookback_days: int) -> List[SourceItem]:
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     return [item for item in items if not item.published_at or item.published_at >= cutoff]
@@ -67,7 +78,7 @@ def _truncate_query(query: str) -> str:
     return truncated
 
 
-def _search_tavily(query: str, max_results: int) -> List[SourceCandidate]:
+def _search_tavily(query: str, max_results: int, search_depth: str = "advanced") -> List[SourceCandidate]:
     if not TAVILY_API_KEY:
         raise RuntimeError("TAVILY_API_KEY is not configured.")
     query = _truncate_query(query)
@@ -76,7 +87,7 @@ def _search_tavily(query: str, max_results: int) -> List[SourceCandidate]:
         json={
             "api_key": TAVILY_API_KEY,
             "query": query,
-            "search_depth": "advanced",
+            "search_depth": search_depth,
             "max_results": max_results,
             "include_answer": False,
         },
@@ -169,6 +180,79 @@ def _dedupe_sources(candidates: List[SourceCandidate]) -> List[SourceCandidate]:
     return deduped
 
 
+def _build_reference_query(source_url: str, published_at: Optional[datetime]) -> str:
+    domain = urlparse(source_url).netloc.lower()
+    query = f"\"{source_url}\""
+    if domain:
+        query = f"{query} -site:{domain}"
+    if published_at:
+        query = f"{query} since {published_at.date().isoformat()}"
+    return _truncate_query(query)
+
+
+def _search_brave_references(query: str, max_results: int) -> tuple[List[SourceCandidate], Optional[int]]:
+    if not BRAVE_SEARCH_API_KEY:
+        raise RuntimeError("BRAVE_SEARCH_API_KEY is not configured.")
+    query = _truncate_query(query)
+    response = requests.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        params={"q": query, "count": max_results},
+        timeout=DEFAULT_TIMEOUT,
+        headers={
+            **DEFAULT_HEADERS,
+            "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
+        },
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total = payload.get("web", {}).get("total")
+    results: List[SourceCandidate] = []
+    for item in payload.get("web", {}).get("results", []):
+        results.append(
+            SourceCandidate(
+                title=item.get("title") or item.get("url", ""),
+                url=item.get("url", ""),
+                snippet=item.get("description"),
+                score=None,
+            )
+        )
+    try:
+        total_int = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_int = None
+    return results, total_int
+
+
+def _search_serpapi_references(query: str, max_results: int) -> tuple[List[SourceCandidate], Optional[int]]:
+    if not SERPAPI_API_KEY:
+        raise RuntimeError("SERPAPI_API_KEY is not configured.")
+    query = _truncate_query(query)
+    response = requests.get(
+        "https://serpapi.com/search.json",
+        params={"engine": "google", "q": query, "num": max_results, "api_key": SERPAPI_API_KEY},
+        timeout=DEFAULT_TIMEOUT,
+        headers=DEFAULT_HEADERS,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    total = payload.get("search_information", {}).get("total_results")
+    results: List[SourceCandidate] = []
+    for item in payload.get("organic_results", []):
+        results.append(
+            SourceCandidate(
+                title=item.get("title") or item.get("link", ""),
+                url=item.get("link", ""),
+                snippet=item.get("snippet"),
+                score=None,
+            )
+        )
+    try:
+        total_int = int(total) if total is not None else None
+    except (TypeError, ValueError):
+        total_int = None
+    return results, total_int
+
+
 @tool
 def search_sources(domain_description: str, max_results: int = SEARCH_MAX_RESULTS) -> List[dict]:
     """Search for high-signal publications and sources for a domain description."""
@@ -184,6 +268,27 @@ def search_sources(domain_description: str, max_results: int = SEARCH_MAX_RESULT
     else:
         results = _search_tavily(query, max_results)
     return [candidate.model_dump() for candidate in _dedupe_sources(results)]
+
+
+@tool
+def count_references(
+    source_url: str, published_at: Optional[str] = None, max_results: int = REFERENCE_SEARCH_MAX_RESULTS
+) -> dict:
+    """Count web references to a source URL."""
+    if not source_url:
+        return {"reference_count": 0, "result_count": 0, "query": ""}
+    published = _parse_iso_datetime(published_at)
+    query = _build_reference_query(source_url, published)
+    if SEARCH_PROVIDER == "brave":
+        results, total = _search_brave_references(query, max_results)
+        count = total if total is not None else len(results)
+    elif SEARCH_PROVIDER == "serpapi":
+        results, total = _search_serpapi_references(query, max_results)
+        count = total if total is not None else len(results)
+    else:
+        results = _search_tavily(query, max_results, search_depth=REFERENCE_SEARCH_DEPTH)
+        count = len(results)
+    return {"reference_count": count, "result_count": len(results), "query": query}
 
 
 def _guess_feed_urls(source_url: str) -> List[str]:
@@ -341,207 +446,3 @@ def fetch_feed(feed_url: str, lookback_days: int = 2, source_name: Optional[str]
             )
         )
     return [item.model_dump() for item in _filter_recent(items, lookback_days)]
-
-
-def _fetch_rss(feed_url: str, source_name: str, lookback_days: int) -> List[SourceItem]:
-    response = requests.get(feed_url, timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
-    response.raise_for_status()
-    feed = feedparser.parse(response.text)
-    items: List[SourceItem] = []
-    for entry in feed.entries:
-        published = _parse_datetime(entry.get("published_parsed"))
-        items.append(
-            SourceItem(
-                title=entry.get("title", "Untitled"),
-                url=entry.get("link", feed_url),
-                published_at=published,
-                source=source_name,
-                summary=entry.get("summary"),
-            )
-        )
-    return _filter_recent(items, lookback_days)
-
-
-def _fetch_github_trending(lookback_days: int) -> List[SourceItem]:
-    url = "https://github.com/trending"
-    response = requests.get(url, timeout=DEFAULT_TIMEOUT, headers=DEFAULT_HEADERS)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    items: List[SourceItem] = []
-
-    for repo in soup.select("article.Box-row"):
-        name = repo.select_one("h2 a")
-        if not name:
-            continue
-        title = " ".join(name.text.split())
-        href = name.get("href", "")
-        summary = repo.select_one("p")
-        items.append(
-            SourceItem(
-                title=title,
-                url=f"https://github.com{href}",
-                published_at=None,
-                source="GitHub Trending",
-                summary=summary.text.strip() if summary else None,
-            )
-        )
-    return _filter_recent(items, lookback_days)
-
-
-@tool
-def bens_bites(lookback_days: int = 2) -> List[dict]:
-    """Fetch Ben's Bites (daily AI roundup)."""
-    items = _fetch_rss("https://www.bensbites.co/feed", "Ben's Bites", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def the_batch(lookback_days: int = 7) -> List[dict]:
-    """Fetch The Batch (DeepLearning.AI)."""
-    items = _fetch_rss("https://www.deeplearning.ai/the-batch/feed/", "The Batch", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def stratechery(lookback_days: int = 7) -> List[dict]:
-    """Fetch Stratechery articles."""
-    items = _fetch_rss("https://stratechery.com/feed/", "Stratechery", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def latent_space(lookback_days: int = 7) -> List[dict]:
-    """Fetch Latent Space posts."""
-    items = _fetch_rss("https://www.latent.space/feed", "Latent Space", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def arxiv_sanity(lookback_days: int = 2) -> List[dict]:
-    """Fetch arXiv Sanity feed."""
-    items = _fetch_rss("http://www.arxiv-sanity.com/rss", "arXiv Sanity", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def papers_with_code(lookback_days: int = 2) -> List[dict]:
-    """Fetch Papers with Code trending."""
-    items = _fetch_rss("https://paperswithcode.com/rss", "Papers with Code", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def huggingface_trending(lookback_days: int = 2) -> List[dict]:
-    """Fetch Hugging Face trending models/datasets."""
-    items = _fetch_rss("https://huggingface.co/blog/feed.xml", "Hugging Face Trending", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def huggingface_daily_papers(lookback_days: int = 2) -> List[dict]:
-    """Fetch Hugging Face daily papers."""
-    items = _fetch_rss("https://huggingface.co/papers?format=rss", "Hugging Face Daily Papers", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def openai_blog(lookback_days: int = 7) -> List[dict]:
-    """Fetch OpenAI blog."""
-    items = _fetch_rss("https://openai.com/blog/rss", "OpenAI Blog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def anthropic_blog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Anthropic blog."""
-    items = _fetch_rss("https://www.anthropic.com/news/rss.xml", "Anthropic Blog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def deepmind_blog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Google DeepMind blog."""
-    items = _fetch_rss("https://deepmind.google/blog/rss.xml", "Google DeepMind Blog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def semianalysis(lookback_days: int = 7) -> List[dict]:
-    """Fetch SemiAnalysis posts."""
-    items = _fetch_rss("https://semianalysis.com/feed", "SemiAnalysis", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def github_trending(lookback_days: int = 2) -> List[dict]:
-    """Fetch GitHub trending repositories."""
-    items = _fetch_github_trending(lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def github_release_radar(lookback_days: int = 7) -> List[dict]:
-    """Fetch GitHub Release Radar posts."""
-    items = _fetch_rss("https://github.blog/feed/", "GitHub Release Radar", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def simon_willison_blog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Simon Willison's blog."""
-    items = _fetch_rss("https://simonwillison.net/atom/everything/", "Simon Willison", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def deno_changelog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Deno changelog."""
-    items = _fetch_rss("https://deno.com/feed", "Deno Changelog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def vercel_changelog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Vercel changelog."""
-    items = _fetch_rss("https://vercel.com/changelog/rss.xml", "Vercel Changelog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def supabase_changelog(lookback_days: int = 7) -> List[dict]:
-    """Fetch Supabase changelog."""
-    items = _fetch_rss("https://supabase.com/blog/rss.xml", "Supabase Changelog", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-@tool
-def ai_engineer_summit(lookback_days: int = 30) -> List[dict]:
-    """Fetch AI Engineer Summit talks + repos."""
-    items = _fetch_rss("https://www.ai.engineer/feed.xml", "AI Engineer Summit", lookback_days)
-    return [item.model_dump() for item in items]
-
-
-STATIC_FEED_TOOLS = [
-    bens_bites,
-    the_batch,
-    stratechery,
-    latent_space,
-    arxiv_sanity,
-    papers_with_code,
-    huggingface_trending,
-    huggingface_daily_papers,
-    openai_blog,
-    anthropic_blog,
-    deepmind_blog,
-    semianalysis,
-    github_trending,
-    github_release_radar,
-    simon_willison_blog,
-    deno_changelog,
-    vercel_changelog,
-    supabase_changelog,
-    ai_engineer_summit,
-]
-
-# Backwards-compat alias for legacy collection flows.
-TREND_TOOLS = STATIC_FEED_TOOLS
