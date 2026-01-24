@@ -24,6 +24,16 @@ python run_daily.py
 
 This executes the LangGraph and upserts trend rows into Supabase.
 
+## View the local site
+
+From the repo root, run:
+
+```bash
+python -m http.server 8001 --directory docs
+```
+
+Then open `http://localhost:8001` in your browser.
+
 ## Customize sources
 
 Update feed URLs or add new tools in `backend/src/trends/tools.py`.

@@ -9,6 +9,9 @@
   --accent: #5ce1e6;
   --accent-strong: #39a6a3;
   --highlight: #f4c542;
+  --title-link: rgba(170, 207, 255, 0.9);
+  --title-link-hover: #cfe5ff;
+  --title-link-underline: rgba(170, 207, 255, 0.4);
   --radius: 18px;
   --shadow: 0 24px 60px rgba(4, 10, 20, 0.45);
 }
@@ -147,6 +150,19 @@ h1 {
   font-weight: 600;
   font-size: 1rem;
   margin-bottom: 0.35rem;
+}
+
+.trend-title a {
+  color: var(--title-link);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.trend-title a:hover,
+.trend-title a:focus-visible {
+  color: var(--title-link-hover);
+  border-color: var(--title-link-underline);
 }
 
 .trend-meta {

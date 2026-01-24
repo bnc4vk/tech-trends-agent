@@ -129,10 +129,13 @@ def _build_llm() -> Optional[ChatOpenAI]:
     )
 
 
-def screen_item(item: SourceItem, llm: Optional[ChatOpenAI]) -> TrendScreen:
-    if llm is None:
+def _build_screen_chain(llm: ChatOpenAI):
+    return SCREEN_PROMPT | llm.with_structured_output(TrendScreen)
+
+
+def screen_item(item: SourceItem, chain) -> TrendScreen:
+    if chain is None:
         return TrendScreen(keep=True, confidence=0.0, rationale="No LLM configured; default keep.")
-    chain = SCREEN_PROMPT | llm.with_structured_output(TrendScreen)
     try:
         return chain.invoke(
             {
@@ -264,6 +267,7 @@ def screen_items(items: List[SourceItem]) -> List[SourceItem]:
     llm = _build_llm()
     if llm is None:
         return items
+    chain = _build_screen_chain(llm)
     total = len(items)
     screened: List[Optional[SourceItem]] = [None] * total
     _log(f"[screen] Screening {total} items with {TRENDS_MAX_WORKERS} workers...")
@@ -271,7 +275,7 @@ def screen_items(items: List[SourceItem]) -> List[SourceItem]:
 
     with ThreadPoolExecutor(max_workers=TRENDS_MAX_WORKERS) as executor:
         future_to_idx = {
-            executor.submit(screen_item, item, llm): idx for idx, item in enumerate(items)
+            executor.submit(screen_item, item, chain): idx for idx, item in enumerate(items)
         }
         completed = 0
         for future in as_completed(future_to_idx):

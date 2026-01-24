@@ -33,13 +33,19 @@
     const meta = fragment.querySelector(".trend-meta");
     const score = fragment.querySelector(".trend-score .value");
 
-    title.textContent = item.title || "Untitled trend";
+    title.textContent = "";
+    if (item.url) {
+      const link = document.createElement("a");
+      link.href = item.url;
+      link.target = "_blank";
+      link.rel = "noreferrer";
+      link.textContent = item.title || "Untitled trend";
+      title.appendChild(link);
+    } else {
+      title.textContent = item.title || "Untitled trend";
+    }
 
-    const link = item.url
-      ? `<a href="${item.url}" target="_blank" rel="noreferrer">${item.publication || "Source"}</a>`
-      : item.publication || "Source";
-
-    meta.innerHTML = `${link} · ${formatDate(item.publication_date)}`;
+    meta.textContent = `${item.publication || "Source"} · ${formatDate(item.publication_date)}`;
 
     score.textContent = Number.isFinite(item.trending_score)
       ? Math.round(item.trending_score)

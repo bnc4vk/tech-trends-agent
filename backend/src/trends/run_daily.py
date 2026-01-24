@@ -5,7 +5,7 @@ import time
 from .graph import run_daily
 
 
-if __name__ == "__main__":
+def run_daily_cli() -> None:
     started = time.perf_counter()
     print("[run] Starting daily trends pipeline...", flush=True)
     state = run_daily()
@@ -17,3 +17,7 @@ if __name__ == "__main__":
         print("[run] Errors:")
         for err in state.errors:
             print(f"- {err}")
+
+
+if __name__ == "__main__":
+    run_daily_cli()

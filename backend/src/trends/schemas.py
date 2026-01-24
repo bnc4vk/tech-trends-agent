@@ -41,7 +41,7 @@ class TrendItem(BaseModel):
     id: str
     category: Category
     title: str
-    announcement: str
+    publication: str
     url: str
     published_at: Optional[datetime]
     source: str

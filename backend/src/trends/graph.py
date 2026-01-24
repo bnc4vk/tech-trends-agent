@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from typing import List
 from urllib.parse import urldefrag, urlparse
@@ -23,6 +24,7 @@ from .config import (
     MIN_UNIQUE_DOMAINS,
     OVERWRITE_EXECUTION,
     TARGET_TRENDS,
+    TRENDS_MAX_WORKERS,
     TRENDS_VERBOSE,
 )
 from .schemas import GraphState, SourceItem, TrendItem
@@ -322,34 +324,47 @@ def evaluate_sources(state: GraphState) -> GraphState:
             title_groups.setdefault(key, []).append(item.source)
 
     reference_cache: dict[str, int] = {}
-    remaining_budget = MAX_REFERENCE_LOOKUPS
     prioritized = sorted(
         assessed,
         key=lambda x: x[0].published_at or datetime.min,
         reverse=True,
     )
 
-    for item, assessment, _category in prioritized:
+    lookup_items: List[tuple[SourceItem, str]] = []
+    for item, _assessment, _category in prioritized:
+        if len(lookup_items) >= MAX_REFERENCE_LOOKUPS:
+            break
         url_key = _normalize_url(item.url)
         if not url_key or url_key in reference_cache:
             continue
-        if remaining_budget <= 0:
-            break
-        try:
+        lookup_items.append((item, url_key))
+
+    if lookup_items:
+        max_workers = min(TRENDS_MAX_WORKERS, 8, len(lookup_items))
+
+        def lookup_reference(item: SourceItem) -> int:
             payload = count_references.invoke(
                 {
                     "source_url": item.url,
                     "published_at": item.published_at.isoformat() if item.published_at else None,
                 }
             )
-            reference_cache[url_key] = int(payload.get("reference_count", 0))
-            remaining_budget -= 1
-        except Exception as exc:
-            _log(f"[evaluate] !! reference lookup failed for {item.url}: {exc}")
-            title_key = _normalize_title(item.title)
-            fallback_sources = title_groups.get(title_key, [item.source]) if title_key else [item.source]
-            reference_cache[url_key] = len(fallback_sources)
-            remaining_budget -= 1
+            return int(payload.get("reference_count", 0))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {
+                executor.submit(lookup_reference, item): (item, url_key)
+                for item, url_key in lookup_items
+            }
+            for future in as_completed(future_to_item):
+                item, url_key = future_to_item[future]
+                try:
+                    reference_cache[url_key] = future.result()
+                except Exception as exc:
+                    _log(f"[evaluate] !! reference lookup failed for {item.url}: {exc}")
+                    title_key = _normalize_title(item.title)
+                    fallback_sources = title_groups.get(title_key, [item.source]) if title_key else [item.source]
+                    reference_cache[url_key] = len(fallback_sources)
 
     for item, assessment, category in assessed:
         key = _normalize_title(item.title)
@@ -364,7 +379,7 @@ def evaluate_sources(state: GraphState) -> GraphState:
                 id=_hash_id(f"{item.source}:{item.title}"),
                 category=category,
                 title=item.title,
-                announcement=item.source,
+                publication=item.source,
                 url=item.url,
                 published_at=item.published_at or datetime.utcnow(),
                 source=item.source,
@@ -412,7 +427,7 @@ def store_results(state: GraphState) -> GraphState:
                 key = f"{key} ({suffix})"
             target[key] = {
                 "url": item.url,
-                "publication": item.announcement,
+                "publication": item.publication,
                 "publication_date": item.published_at.date().isoformat() if item.published_at else None,
                 "trending_score": item.trending_score,
             }

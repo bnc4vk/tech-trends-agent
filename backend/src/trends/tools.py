@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import List, Optional
@@ -76,11 +76,20 @@ def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _to_naive_utc(value: Optional[datetime]) -> Optional[datetime]:
+    if not value:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return _to_naive_utc(parsed)
     except ValueError:
         return None
 
@@ -96,7 +105,7 @@ def _parse_date_value(value: Optional[str]) -> Optional[datetime]:
         return parsed
     for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(cleaned, fmt)
+            return _to_naive_utc(datetime.strptime(cleaned, fmt))
         except ValueError:
             continue
     return None
@@ -117,12 +126,24 @@ def _parse_date_from_url(url: str) -> Optional[datetime]:
 
 def _filter_recent(items: List[SourceItem], lookback_days: int) -> List[SourceItem]:
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
-    return [item for item in items if not item.published_at or item.published_at >= cutoff]
+    filtered: List[SourceItem] = []
+    for item in items:
+        if item.published_at:
+            item.published_at = _to_naive_utc(item.published_at)
+        if not item.published_at or item.published_at >= cutoff:
+            filtered.append(item)
+    return filtered
 
 
 def _filter_recent_strict(items: List[SourceItem], lookback_days: int) -> List[SourceItem]:
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
-    return [item for item in items if item.published_at and item.published_at >= cutoff]
+    filtered: List[SourceItem] = []
+    for item in items:
+        if item.published_at:
+            item.published_at = _to_naive_utc(item.published_at)
+        if item.published_at and item.published_at >= cutoff:
+            filtered.append(item)
+    return filtered
 
 
 def _has_class_hint(value: Optional[str | list]) -> bool:
@@ -271,7 +292,7 @@ def _search_tavily(query: str, max_results: int, search_depth: str = "advanced")
     return results
 
 
-def _search_brave(query: str, max_results: int) -> List[SourceCandidate]:
+def _search_brave_payload(query: str, max_results: int) -> dict:
     if not BRAVE_SEARCH_API_KEY:
         raise RuntimeError("BRAVE_SEARCH_API_KEY is not configured.")
     query = _truncate_query(query)
@@ -285,7 +306,25 @@ def _search_brave(query: str, max_results: int) -> List[SourceCandidate]:
         },
     )
     response.raise_for_status()
-    payload = response.json()
+    return response.json()
+
+
+def _search_serpapi_payload(query: str, max_results: int) -> dict:
+    if not SERPAPI_API_KEY:
+        raise RuntimeError("SERPAPI_API_KEY is not configured.")
+    query = _truncate_query(query)
+    response = requests.get(
+        "https://serpapi.com/search.json",
+        params={"engine": "google", "q": query, "num": max_results, "api_key": SERPAPI_API_KEY},
+        timeout=DEFAULT_TIMEOUT,
+        headers=DEFAULT_HEADERS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _search_brave(query: str, max_results: int) -> List[SourceCandidate]:
+    payload = _search_brave_payload(query, max_results)
     results: List[SourceCandidate] = []
     for item in payload.get("web", {}).get("results", []):
         results.append(
@@ -298,17 +337,7 @@ def _search_brave(query: str, max_results: int) -> List[SourceCandidate]:
 
 
 def _search_serpapi(query: str, max_results: int) -> List[SourceCandidate]:
-    if not SERPAPI_API_KEY:
-        raise RuntimeError("SERPAPI_API_KEY is not configured.")
-    query = _truncate_query(query)
-    response = requests.get(
-        "https://serpapi.com/search.json",
-        params={"engine": "google", "q": query, "num": max_results, "api_key": SERPAPI_API_KEY},
-        timeout=DEFAULT_TIMEOUT,
-        headers=DEFAULT_HEADERS,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    payload = _search_serpapi_payload(query, max_results)
     results: List[SourceCandidate] = []
     for item in payload.get("organic_results", []):
         results.append(
@@ -343,20 +372,7 @@ def _build_reference_query(source_url: str, published_at: Optional[datetime]) ->
 
 
 def _search_brave_references(query: str, max_results: int) -> tuple[List[SourceCandidate], Optional[int]]:
-    if not BRAVE_SEARCH_API_KEY:
-        raise RuntimeError("BRAVE_SEARCH_API_KEY is not configured.")
-    query = _truncate_query(query)
-    response = requests.get(
-        "https://api.search.brave.com/res/v1/web/search",
-        params={"q": query, "count": max_results},
-        timeout=DEFAULT_TIMEOUT,
-        headers={
-            **DEFAULT_HEADERS,
-            "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
-        },
-    )
-    response.raise_for_status()
-    payload = response.json()
+    payload = _search_brave_payload(query, max_results)
     total = payload.get("web", {}).get("total")
     results: List[SourceCandidate] = []
     for item in payload.get("web", {}).get("results", []):
@@ -374,17 +390,7 @@ def _search_brave_references(query: str, max_results: int) -> tuple[List[SourceC
 
 
 def _search_serpapi_references(query: str, max_results: int) -> tuple[List[SourceCandidate], Optional[int]]:
-    if not SERPAPI_API_KEY:
-        raise RuntimeError("SERPAPI_API_KEY is not configured.")
-    query = _truncate_query(query)
-    response = requests.get(
-        "https://serpapi.com/search.json",
-        params={"engine": "google", "q": query, "num": max_results, "api_key": SERPAPI_API_KEY},
-        timeout=DEFAULT_TIMEOUT,
-        headers=DEFAULT_HEADERS,
-    )
-    response.raise_for_status()
-    payload = response.json()
+    payload = _search_serpapi_payload(query, max_results)
     total = payload.get("search_information", {}).get("total_results")
     results: List[SourceCandidate] = []
     for item in payload.get("organic_results", []):
@@ -546,12 +552,6 @@ def discover_feeds(source_url: str, max_feeds: int = 3) -> List[dict]:
 
 
 @tool
-def standardize_source(source_url: str, max_feeds: int = 3) -> List[dict]:
-    """Convert a source into standardized feed endpoints (RSS/Atom/JSON)."""
-    return [feed.model_dump() for feed in _discover_feeds_impl(source_url, max_feeds)]
-
-
-@tool
 def fetch_non_rss(
     source_url: str,
     lookback_days: int = 2,
@@ -579,12 +579,7 @@ def fetch_feed(feed_url: str, lookback_days: int = 2, source_name: Optional[str]
         payload = response.json()
         for entry in payload.get("items", []):
             published_raw = entry.get("date_published") or entry.get("date_modified")
-            published = None
-            if published_raw:
-                try:
-                    published = datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
-                except ValueError:
-                    published = None
+            published = _parse_iso_datetime(published_raw) if published_raw else None
             items.append(
                 SourceItem(
                     title=entry.get("title") or "Untitled",
