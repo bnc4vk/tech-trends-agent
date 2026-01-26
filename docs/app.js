@@ -14,17 +14,26 @@
     return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   };
 
-  const calcLastUpdated = (record) => {
-    if (!record) return "—";
-    const dateValue = record.run_date || record.updated_at;
-    if (!dateValue) return "—";
-    const parsed = new Date(dateValue);
-    if (Number.isNaN(parsed.getTime())) return dateValue;
+  const formatLongDate = (value) => {
+    if (!value) return null;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
     return parsed.toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
       year: "numeric"
     });
+  };
+
+  const calcTrendWindow = (record) => {
+    if (!record) return "—";
+    const start = formatLongDate(record?.trend_window?.start_date);
+    const end = formatLongDate(record?.trend_window?.end_date);
+    if (start && end) {
+      return `${start} and ${end}`;
+    }
+    const fallback = formatLongDate(record.run_date || record.updated_at);
+    return fallback ? `Trending between ${fallback} and ${fallback}` : "—";
   };
 
   const createRow = (item) => {
@@ -133,7 +142,7 @@
     renderList(research, researchList);
     renderList(infra, infraList);
 
-    lastUpdated.textContent = calcLastUpdated(record);
+    lastUpdated.textContent = calcTrendWindow(record);
     const publications = new Set(
       [...products, ...research, ...infra].map((item) => item.publication).filter(Boolean)
     );

@@ -10,7 +10,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Create a `.env` file using `.env.example` as a template. Configure a search provider (Tavily, Brave, or SerpAPI) to enable dynamic source discovery.
+Create a `.env` file using `.env.example` as a template. Configure a search provider (Tavily, Brave, or SerpAPI) to enable dynamic source discovery. Trend scoring always uses SerpAPI, regardless of `SEARCH_PROVIDER`.
 
 ## Supabase
 

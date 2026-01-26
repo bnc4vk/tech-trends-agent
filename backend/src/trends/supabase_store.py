@@ -22,6 +22,7 @@ def upsert_daily_record(
     products: dict,
     research: dict,
     infra: dict,
+    trend_window: dict | None = None,
 ) -> None:
     if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
         raise RuntimeError("Supabase credentials are missing.")
@@ -32,6 +33,7 @@ def upsert_daily_record(
         "products": products,
         "research": research,
         "infra": infra,
+        "trend_window": trend_window,
         "updated_at": datetime.utcnow().isoformat(),
     }
     client.table(SUPABASE_TABLE).upsert(payload).execute()

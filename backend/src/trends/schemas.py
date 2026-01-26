@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -14,17 +14,12 @@ class SourceItem(BaseModel):
     published_at: Optional[datetime] = None
     source: str
     summary: Optional[str] = None
+    category: Optional[Category] = None
 
 
 class SourceCandidate(BaseModel):
     title: str
     url: str
-
-
-class FeedCandidate(BaseModel):
-    feed_url: str
-    feed_type: str
-    title: Optional[str] = None
 
 
 class TrendAssessment(BaseModel):
@@ -54,10 +49,11 @@ class TrendItem(BaseModel):
 class GraphState(BaseModel):
     run_date: Optional[str] = None
     lookback_days: int = 3
-    target_trend_count: int = 20
-    max_lookback_days: int = 14
-    lookback_history: List[int] = Field(default_factory=list)
     raw_items: List[SourceItem] = Field(default_factory=list)
+    pending_items: List[SourceItem] = Field(default_factory=list)
+    inactive_categories: List[Category] = Field(default_factory=list)
+    collection_pass: int = 0
+    last_collect_added: int = 0
+    last_collect_categories: List[Category] = Field(default_factory=list)
     assessed_items: List[TrendItem] = Field(default_factory=list)
-    title_references: Dict[str, List[str]] = Field(default_factory=dict)
     errors: List[str] = Field(default_factory=list)

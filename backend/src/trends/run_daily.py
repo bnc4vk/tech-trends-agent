@@ -10,7 +10,7 @@ def run_daily_cli() -> None:
     print("[run] Starting daily trends pipeline...", flush=True)
     state = run_daily()
     elapsed = time.perf_counter() - started
-    print(f"[run] Collected {len(state.raw_items)} raw items")
+    print(f"[run] Collected {len(state.raw_items)} screened items")
     print(f"[run] Assessed {len(state.assessed_items)} trends")
     print(f"[run] Done in {elapsed:.1f}s")
     if state.errors:
