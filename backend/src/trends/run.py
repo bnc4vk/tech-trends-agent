@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import time
 
-from .graph import run_daily
+from .graph import run
 
 
-def run_daily_cli() -> None:
+def run_cli() -> None:
     started = time.perf_counter()
-    print("[run] Starting daily trends pipeline...", flush=True)
-    state = run_daily()
+    print("[run] Starting trends pipeline...", flush=True)
+    state = run()
     elapsed = time.perf_counter() - started
     print(f"[run] Collected {len(state.raw_items)} screened items")
     print(f"[run] Assessed {len(state.assessed_items)} trends")
@@ -20,4 +20,4 @@ def run_daily_cli() -> None:
 
 
 if __name__ == "__main__":
-    run_daily_cli()
+    run_cli()

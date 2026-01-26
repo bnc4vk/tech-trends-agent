@@ -1,6 +1,6 @@
 # Tech Trends Agent (LangGraph)
 
-This agentic pipeline collects daily tech trend signals, assigns expert evaluations, computes a trending score, and stores results in Supabase for the static front-end.
+This agentic pipeline collects tech trend signals, assigns expert evaluations, computes a trending score, and stores results in Supabase for the static front-end.
 
 ## Setup
 
@@ -14,12 +14,12 @@ Create a `.env` file using `.env.example` as a template. Configure a search prov
 
 ## Supabase
 
-Run the schema in `supabase.sql` in your Supabase SQL editor. This creates the `tech_trends` table (daily rollups with products, research, and infra buckets).
+Run the schema in `supabase.sql` in your Supabase SQL editor. This creates the `tech_trends` table (rollups with products, research, and infra buckets).
 
-## Run the daily pipeline
+## Run the pipeline
 
 ```bash
-python run_daily.py
+python run.py
 ```
 
 This executes the LangGraph and upserts trend rows into Supabase.

@@ -23,7 +23,7 @@ from .config import (
 from .curated_sources import FEED_SOURCES
 from .schemas import GraphState, SourceItem, TrendItem
 from .scoring import compute_trending_score
-from .supabase_store import daily_record_exists, upsert_daily_record
+from .supabase_store import run_record_exists, upsert_run_record
 from .tools import count_references, fetch_feed
 
 
@@ -354,11 +354,11 @@ def store_results(state: GraphState) -> GraphState:
 
         run_date = date.fromisoformat(state.run_date) if state.run_date else datetime.utcnow().date()
         _log(
-            f"[store] Upserting daily record for {run_date.isoformat()} "
+            f"[store] Upserting run record for {run_date.isoformat()} "
             f"({len(products)} products, {len(research)} research, {len(infra)} infra)..."
         )
-        upsert_daily_record(run_date, products, research, infra, trend_window)
-        _log("[store] Daily upsert complete.")
+        upsert_run_record(run_date, products, research, infra, trend_window)
+        _log("[store] Run upsert complete.")
     else:
         print("[store] No assessed items; skipping Supabase upsert.", flush=True)
     return state
@@ -381,15 +381,15 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def run_daily(lookback_days: int | None = None) -> GraphState:
+def run(lookback_days: int | None = None) -> GraphState:
     run_date = datetime.utcnow().date()
-    exists = daily_record_exists(run_date)
+    exists = run_record_exists(run_date)
     if not OVERWRITE_EXECUTION and exists:
-        _log(f"[run] Daily record for {run_date.isoformat()} already exists. Skipping execution.")
+        _log(f"[run] Run record for {run_date.isoformat()} already exists. Skipping execution.")
         return GraphState(
             run_date=run_date.isoformat(),
             lookback_days=DEFAULT_LOOKBACK_DAYS,
-            errors=[f"Daily record exists for {run_date.isoformat()}"],
+            errors=[f"Run record exists for {run_date.isoformat()}"],
         )
 
     graph = build_graph().compile()

@@ -7,7 +7,7 @@ from supabase import create_client
 from .config import SUPABASE_SECRET_KEY, SUPABASE_TABLE, SUPABASE_URL
 
 
-def daily_record_exists(run_date: date) -> bool:
+def run_record_exists(run_date: date) -> bool:
     if not SUPABASE_URL or not SUPABASE_SECRET_KEY:
         raise RuntimeError("Supabase credentials are missing.")
 
@@ -17,7 +17,7 @@ def daily_record_exists(run_date: date) -> bool:
     return bool(response.data)
 
 
-def upsert_daily_record(
+def upsert_run_record(
     run_date: date,
     products: dict,
     research: dict,
