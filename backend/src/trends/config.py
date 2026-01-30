@@ -33,7 +33,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 OPENAI_API_KEY = _env("OPENAI_API_KEY")
-TRENDS_LLM_MODEL = _env("TRENDS_LLM_MODEL", "gpt-4.1-mini")
+MISTRAL_API_KEY = _env("MISTRAL_API_KEY")
+TRENDS_LLM_MODEL = _env("TRENDS_LLM_MODEL", "mistral-small-2506")
 SUPABASE_URL = _env("SUPABASE_URL")
 SUPABASE_SECRET_KEY = _env("SUPABASE_SECRET_KEY")
 SUPABASE_TABLE = _env("SUPABASE_TABLE", "tech_trends")

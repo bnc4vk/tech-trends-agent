@@ -5,10 +5,11 @@ from typing import List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain_mistralai import ChatMistralAI
 
 from .config import (
     MIN_SCREEN_CONFIDENCE,
-    OPENAI_API_KEY,
+    MISTRAL_API_KEY,
     TRENDS_LLM_MODEL,
     TRENDS_LLM_TIMEOUT,
     TRENDS_VERBOSE,
@@ -21,14 +22,37 @@ SCREEN_PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             """
-You are a strict reviewer assessing whether an item represents a meaningful tech trend.
-Keep items only if they describe real developments, notable launches, research advances,
-infrastructure shifts, or clear industry adoption signals.
-Discard items that are job postings, hiring/careers pages, internships, events without
-substantive tech content, link lists or RSS directories, minor changelogs, marketing fluff,
-spam, or anything off-topic.
-If the item is not clearly a tech trend, set keep=false and use a low confidence score.
-Return a keep decision, confidence (0-1), and a brief rationale.
+You are a strict tech-trend screener. Your job: decide whether the item is a meaningful tech trend signal.
+
+KEEP=true only if the item indicates at least ONE of:
+- A real product/feature launch or major update with clear technical substance
+- A research/engineering breakthrough (paper, benchmark, method) with concrete claims
+- An infrastructure/platform shift (standards, major cloud/platform changes, chips, frameworks)
+- Clear industry adoption/usage signals (major deployment, rollout, integration, procurement)
+- A significant security incident/vulnerability with broad relevance
+
+DISCARD (KEEP=false) if it is primarily:
+- Job posting / careers / hiring page / internships
+- Event announcement without substantive technical content
+- Link list, RSS directory, “roundup” with no new info
+- Minor changelog, routine patch notes, trivial version bump
+- Marketing fluff, vague thought leadership, sales pitch, spam, off-topic
+- Duplicate/near-duplicate of widely repeated news with no new detail
+
+If the summary/title are too vague to justify KEEP, default to KEEP=false.
+
+Return ONLY valid JSON with exactly these keys:
+{{
+  "keep": boolean,
+  "confidence": number,
+  "rationale": string
+}}
+
+Confidence rubric:
+- 0.85–1.00: strongly supported by specific facts (who/what/launched/results/dates)
+- 0.60–0.84: likely trend, some specifics but not fully verified
+- 0.35–0.59: ambiguous / partial signal / could be fluff
+- 0.00–0.34: low-info, off-topic, spam, or clearly not a trend
 """.strip(),
         ),
         (
@@ -38,6 +62,8 @@ Source: {source}
 Title: {title}
 Summary: {summary}
 URL: {url}
+
+Decide keep/confidence/rationale.
 """.strip(),
         ),
     ]
@@ -49,13 +75,13 @@ def _log(message: str) -> None:
 
 
 def _build_llm() -> Optional[ChatOpenAI]:
-    if not OPENAI_API_KEY:
+    if not MISTRAL_API_KEY:
         return None
-    return ChatOpenAI(
+    return ChatMistralAI(
         model=TRENDS_LLM_MODEL,
         temperature=0.2,
-        api_key=OPENAI_API_KEY,
-        request_timeout=TRENDS_LLM_TIMEOUT,
+        api_key=MISTRAL_API_KEY,
+        timeout=TRENDS_LLM_TIMEOUT,
         max_retries=1,
     )
 
