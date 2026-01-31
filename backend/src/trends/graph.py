@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph
 
 from .agents import evaluate_items, screen_items
 from .config import (
+    COMPUTE_TRENDING_SCORE,
     COLLECTION_LIMIT_PER_CATEGORY,
     DEFAULT_LOOKBACK_DAYS,
     MAX_COLLECTION_PASSES,
@@ -192,7 +193,10 @@ def should_collect_more(state: GraphState) -> str:
 
 
 def evaluate_sources(state: GraphState) -> GraphState:
-    _log(f"[evaluate] Scoring {len(state.raw_items)} items...")
+    _log(
+        f"[evaluate] Evaluating {len(state.raw_items)} items "
+        f"(compute_trending_score={COMPUTE_TRENDING_SCORE})..."
+    )
     assessed = evaluate_items(state.raw_items)
     trends: List[TrendItem] = []
 
@@ -203,78 +207,89 @@ def evaluate_sources(state: GraphState) -> GraphState:
 
     reference_cache: dict[str, int] = {}
     reference_source: dict[str, str] = {}
-    prioritized = sorted(
-        assessed,
-        key=lambda x: x[0].published_at or datetime.min,
-        reverse=True,
-    )
 
-    lookup_items: List[tuple[SourceItem, str]] = []
-    for item, _assessment, _category in prioritized:
-        if len(lookup_items) >= MAX_REFERENCE_LOOKUPS:
-            break
-        url_key = _normalize_url(item.url)
-        if not url_key or url_key in reference_cache:
-            continue
-        lookup_items.append((item, url_key))
+    if COMPUTE_TRENDING_SCORE:
+        prioritized = sorted(
+            assessed,
+            key=lambda x: x[0].published_at or datetime.min,
+            reverse=True,
+        )
 
-    if lookup_items:
-        max_workers = min(TRENDS_MAX_WORKERS, 8, len(lookup_items))
+        lookup_items: List[tuple[SourceItem, str]] = []
+        for item, _assessment, _category in prioritized:
+            if len(lookup_items) >= MAX_REFERENCE_LOOKUPS:
+                break
+            url_key = _normalize_url(item.url)
+            if not url_key or url_key in reference_cache:
+                continue
+            lookup_items.append((item, url_key))
 
-        def lookup_reference(item: SourceItem) -> tuple[int, int, int]:
-            payload = count_references.invoke(
-                {
-                    "source_url": item.url,
-                    "title": item.title,
-                    "published_at": item.published_at.isoformat() if item.published_at else None,
+        if lookup_items:
+            max_workers = min(TRENDS_MAX_WORKERS, 8, len(lookup_items))
+
+            def lookup_reference(item: SourceItem) -> tuple[int, int, int]:
+                payload = count_references.invoke(
+                    {
+                        "source_url": item.url,
+                        "title": item.title,
+                        "published_at": item.published_at.isoformat() if item.published_at else None,
+                    }
+                )
+                return (
+                    int(payload.get("coverage_count", 0)),
+                    int(payload.get("url_count", 0)),
+                    int(payload.get("title_count", 0)),
+                )
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_item = {
+                    executor.submit(lookup_reference, item): (item, url_key)
+                    for item, url_key in lookup_items
                 }
-            )
-            return (
-                int(payload.get("coverage_count", 0)),
-                int(payload.get("url_count", 0)),
-                int(payload.get("title_count", 0)),
-            )
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_item = {
-                executor.submit(lookup_reference, item): (item, url_key)
-                for item, url_key in lookup_items
-            }
-            for future in as_completed(future_to_item):
-                item, url_key = future_to_item[future]
-                try:
-                    coverage_count, url_count, title_count = future.result()
-                    reference_cache[url_key] = coverage_count
-                    if coverage_count == 0:
-                        reference_source[url_key] = "lookup-empty"
-                    elif coverage_count == url_count == title_count:
-                        reference_source[url_key] = "lookup-url+title"
-                    elif coverage_count == url_count:
-                        reference_source[url_key] = "lookup-url"
-                    else:
-                        reference_source[url_key] = "lookup-title"
-                except Exception as exc:
-                    _log(f"[evaluate] !! reference lookup failed for {item.url}: {exc}")
-                    title_key = _normalize_title(item.title)
-                    fallback_sources = title_groups.get(title_key, [item.source]) if title_key else [item.source]
-                    reference_cache[url_key] = len(fallback_sources)
-                    reference_source[url_key] = "fallback-title"
+                for future in as_completed(future_to_item):
+                    item, url_key = future_to_item[future]
+                    try:
+                        coverage_count, url_count, title_count = future.result()
+                        reference_cache[url_key] = coverage_count
+                        if coverage_count == 0:
+                            reference_source[url_key] = "lookup-empty"
+                        elif coverage_count == url_count == title_count:
+                            reference_source[url_key] = "lookup-url+title"
+                        elif coverage_count == url_count:
+                            reference_source[url_key] = "lookup-url"
+                        else:
+                            reference_source[url_key] = "lookup-title"
+                    except Exception as exc:
+                        _log(f"[evaluate] !! reference lookup failed for {item.url}: {exc}")
+                        title_key = _normalize_title(item.title)
+                        fallback_sources = title_groups.get(title_key, [item.source]) if title_key else [item.source]
+                        reference_cache[url_key] = len(fallback_sources)
+                        reference_source[url_key] = "fallback-title"
+    else:
+        _log("[evaluate] COMPUTE_TRENDING_SCORE=false; skipping reference lookups.")
 
     for item, assessment, category in assessed:
         key = _normalize_title(item.title)
         url_key = _normalize_url(item.url)
         source_refs = title_groups.get(key, [item.source]) if key else [item.source]
         fallback_count = len(source_refs)
-        if url_key and url_key in reference_cache:
-            reference_count = reference_cache.get(url_key, fallback_count)
-            ref_source = reference_source.get(url_key, "lookup")
+
+        if COMPUTE_TRENDING_SCORE:
+            if url_key and url_key in reference_cache:
+                reference_count = reference_cache.get(url_key, fallback_count)
+                ref_source = reference_source.get(url_key, "lookup")
+            else:
+                reference_count = fallback_count
+                ref_source = "title-group"
+            _log(f"[evaluate] references ({ref_source}) {reference_count} for {item.url}")
+            trending_score = compute_trending_score(reference_count, item.published_at)
+            if reference_count == 0:
+                _log(f"[score] score 0 due to lack of references for {item.url}")
         else:
+            # Use a lightweight proxy count (number of curated sources that surfaced the item)
+            # but DO NOT persist trending_score downstream.
             reference_count = fallback_count
-            ref_source = "title-group"
-        _log(f"[evaluate] references ({ref_source}) {reference_count} for {item.url}")
-        trending_score = compute_trending_score(reference_count, item.published_at)
-        if reference_count == 0:
-            _log(f"[score] score 0 due to lack of references for {item.url}")
+            trending_score = 0.0
 
         trends.append(
             TrendItem(
@@ -296,10 +311,28 @@ def evaluate_sources(state: GraphState) -> GraphState:
     for trend in trends:
         key = _normalize_title(trend.title) or trend.id
         existing = deduped.get(key)
-        if not existing or trend.trending_score > existing.trending_score:
+        if not existing:
             deduped[key] = trend
+            continue
 
-    sorted_trends = sorted(deduped.values(), key=lambda x: x.trending_score, reverse=True)
+        if COMPUTE_TRENDING_SCORE:
+            if trend.trending_score > existing.trending_score:
+                deduped[key] = trend
+        else:
+            cand = (trend.published_at or datetime.min, trend.reference_count)
+            prev = (existing.published_at or datetime.min, existing.reference_count)
+            if cand > prev:
+                deduped[key] = trend
+
+    if COMPUTE_TRENDING_SCORE:
+        sorted_trends = sorted(deduped.values(), key=lambda x: x.trending_score, reverse=True)
+    else:
+        sorted_trends = sorted(
+            deduped.values(),
+            key=lambda x: (x.published_at or datetime.min, x.reference_count),
+            reverse=True,
+        )
+
     per_category_counts = {"product": 0, "research": 0, "infra": 0}
     limited: List[TrendItem] = []
     for trend in sorted_trends:
@@ -328,14 +361,28 @@ def store_results(state: GraphState) -> GraphState:
                 while f"{key} ({suffix})" in target:
                     suffix += 1
                 key = f"{key} ({suffix})"
-            target[key] = {
+
+            entry = {
                 "url": item.url,
                 "publication": item.publication,
                 "publication_date": item.published_at.date().isoformat() if item.published_at else None,
-                "trending_score": item.trending_score,
             }
 
-        for item in sorted(state.assessed_items, key=lambda x: x.trending_score, reverse=True):
+            if COMPUTE_TRENDING_SCORE:
+                entry["trending_score"] = item.trending_score
+
+            target[key] = entry
+
+        if COMPUTE_TRENDING_SCORE:
+            ordered = sorted(state.assessed_items, key=lambda x: x.trending_score, reverse=True)
+        else:
+            ordered = sorted(
+                state.assessed_items,
+                key=lambda x: x.published_at or datetime.min,
+                reverse=True,
+            )
+
+        for item in ordered:
             if item.category == "product":
                 add_entry(products, item)
             elif item.category == "infra":
@@ -398,7 +445,7 @@ def run(lookback_days: int | None = None) -> GraphState:
         lookback_days=DEFAULT_LOOKBACK_DAYS,
     )
     result = graph.invoke(state)
-    #LangGraph returns a dict, convert it back to GraphState
+    # LangGraph returns a dict, convert it back to GraphState
     if isinstance(result, dict):
         return GraphState(**result)
     return result

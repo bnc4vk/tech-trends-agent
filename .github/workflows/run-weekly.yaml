@@ -1,8 +1,8 @@
-name: Run trends pipeline
+name: Run trends pipeline (weekly scoring)
 
 on:
   schedule:
-    - cron: "23 9 */3 * *"
+    - cron: "23 9 * * 1" # Mondays at 09:23 UTC
   workflow_dispatch: {}
 
 jobs:
@@ -23,6 +23,7 @@ jobs:
       - name: Run pipeline
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COMPUTE_TRENDING_SCORE: "true"
           SERPAPI_API_KEY: ${{ secrets.SERPAPI_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
