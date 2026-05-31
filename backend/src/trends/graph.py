@@ -14,6 +14,8 @@ from .config import (
     COMPUTE_TRENDING_SCORE,
     COLLECTION_LIMIT_PER_CATEGORY,
     DEFAULT_LOOKBACK_DAYS,
+    DYNAMIC_DISCOVERY_ENABLED,
+    DYNAMIC_DISCOVERY_PER_CATEGORY,
     MAX_COLLECTION_PASSES,
     MAX_REFERENCE_LOOKUPS,
     MAX_TRENDS_PER_CATEGORY,
@@ -21,11 +23,11 @@ from .config import (
     TRENDS_MAX_WORKERS,
     TRENDS_VERBOSE,
 )
-from .curated_sources import FEED_SOURCES
+from .curated_sources import FEED_SOURCES, FeedSource
 from .schemas import GraphState, SourceItem, TrendItem
 from .scoring import compute_trending_score
 from .supabase_store import run_record_exists, upsert_run_record
-from .tools import count_references, fetch_feed
+from .tools import count_references, discover_trending_candidates, fetch_feed
 
 
 def _log(message: str) -> None:
@@ -59,6 +61,17 @@ def _count_by_category(items: List[SourceItem]) -> dict[str, int]:
     return counts
 
 
+def _count_trends_by_category(items: List[TrendItem]) -> dict[str, int]:
+    counts = {"product": 0, "research": 0, "infra": 0}
+    for item in items:
+        counts[item.category] = counts.get(item.category, 0) + 1
+    return counts
+
+
+def _is_lookup_backed(reference_source: str) -> bool:
+    return reference_source == "lookup" or reference_source.startswith("lookup-")
+
+
 def _round_robin_append(
     collected: List[SourceItem],
     counts: dict[str, int],
@@ -66,24 +79,41 @@ def _round_robin_append(
     results: List[dict],
     seen_titles: set[str],
     seen_urls: set[str],
+    category_limit: int = COLLECTION_LIMIT_PER_CATEGORY,
 ) -> None:
     for raw in results:
-        if counts.get(feed.category, 0) >= COLLECTION_LIMIT_PER_CATEGORY:
+        if counts.get(feed.category, 0) >= category_limit:
             break
         payload = dict(raw)
         payload["category"] = feed.category
         item = SourceItem(**payload)
-        title_key = _normalize_title(item.title)
-        url_key = _normalize_url(item.url)
-        if (title_key and title_key in seen_titles) or (url_key and url_key in seen_urls):
-            continue
-        if title_key:
-            seen_titles.add(title_key)
-        if url_key:
-            seen_urls.add(url_key)
-        collected.append(item)
-        counts[feed.category] = counts.get(feed.category, 0) + 1
-        break
+        if _append_item(collected, counts, item, seen_titles, seen_urls, category_limit):
+            break
+
+
+def _append_item(
+    collected: List[SourceItem],
+    counts: dict[str, int],
+    item: SourceItem,
+    seen_titles: set[str],
+    seen_urls: set[str],
+    category_limit: int,
+) -> bool:
+    if not item.category:
+        return False
+    if counts.get(item.category, 0) >= category_limit:
+        return False
+    title_key = _normalize_title(item.title)
+    url_key = _normalize_url(item.url)
+    if (title_key and title_key in seen_titles) or (url_key and url_key in seen_urls):
+        return False
+    if title_key:
+        seen_titles.add(title_key)
+    if url_key:
+        seen_urls.add(url_key)
+    collected.append(item)
+    counts[item.category] = counts.get(item.category, 0) + 1
+    return True
 
 
 def collect_sources(state: GraphState) -> GraphState:
@@ -96,6 +126,11 @@ def collect_sources(state: GraphState) -> GraphState:
     seen_titles: set[str] = {_normalize_title(item.title) for item in existing_all if item.title}
     seen_urls: set[str] = {_normalize_url(item.url) for item in existing_all if item.url}
     attempted_categories: set[str] = set()
+    dynamic_reserve = DYNAMIC_DISCOVERY_PER_CATEGORY if DYNAMIC_DISCOVERY_ENABLED else 0
+    feed_limits = {
+        category: max(COLLECTION_LIMIT_PER_CATEGORY - dynamic_reserve, 0)
+        for category in ("product", "research", "infra")
+    }
 
     _log(f"[collect] Starting curated feed collection ({len(FEED_SOURCES)} feeds)...")
     feed_entries: List[tuple[FeedSource, List[dict]]] = []
@@ -103,7 +138,7 @@ def collect_sources(state: GraphState) -> GraphState:
         attempted_categories.add(feed.category)
         if feed.category in inactive:
             continue
-        if counts.get(feed.category, 0) >= COLLECTION_LIMIT_PER_CATEGORY:
+        if counts.get(feed.category, 0) >= feed_limits[feed.category]:
             continue
         try:
             start = time.perf_counter()
@@ -129,17 +164,99 @@ def collect_sources(state: GraphState) -> GraphState:
         for feed, results in feed_entries:
             if feed.category in inactive:
                 continue
+            if counts.get(feed.category, 0) >= feed_limits[feed.category]:
+                continue
+            before = len(collected)
+            _round_robin_append(
+                collected,
+                counts,
+                feed,
+                results,
+                seen_titles,
+                seen_urls,
+                feed_limits[feed.category],
+            )
+            if len(collected) > before:
+                progress = True
+
+    if DYNAMIC_DISCOVERY_ENABLED and dynamic_reserve > 0:
+        for category in ("product", "research", "infra"):
+            attempted_categories.add(category)
+            if category in inactive:
+                continue
+            if counts.get(category, 0) >= COLLECTION_LIMIT_PER_CATEGORY:
+                continue
+            try:
+                start = time.perf_counter()
+                _log(f"[collect] -> discover_trending_candidates {category}")
+                results = discover_trending_candidates.invoke(
+                    {
+                        "category": category,
+                        "lookback_days": state.lookback_days,
+                        "max_results": dynamic_reserve * 2,
+                    }
+                )
+                elapsed = time.perf_counter() - start
+                _log(f"[collect] <- discover_trending_candidates {category} ({len(results)} items, {elapsed:.1f}s)")
+            except Exception as exc:
+                errors.append(f"discover_trending_candidates/{category}: {exc}")
+                _log(f"[collect] !! discover_trending_candidates failed for {category}: {exc}")
+                continue
+
+            for raw in results:
+                if counts.get(category, 0) >= COLLECTION_LIMIT_PER_CATEGORY:
+                    break
+                payload = dict(raw)
+                payload["category"] = category
+                item = SourceItem(**payload)
+                _append_item(collected, counts, item, seen_titles, seen_urls, COLLECTION_LIMIT_PER_CATEGORY)
+
+    progress = True
+    while progress:
+        progress = False
+        for feed, results in feed_entries:
+            if feed.category in inactive:
+                continue
             if counts.get(feed.category, 0) >= COLLECTION_LIMIT_PER_CATEGORY:
                 continue
             before = len(collected)
-            _round_robin_append(collected, counts, feed, results, seen_titles, seen_urls)
+            _round_robin_append(
+                collected,
+                counts,
+                feed,
+                results,
+                seen_titles,
+                seen_urls,
+                COLLECTION_LIMIT_PER_CATEGORY,
+            )
             if len(collected) > before:
                 progress = True
 
     total_new = len(collected)
+    feed_new = sum(1 for item in collected if item.discovery_method == "feed")
+    search_new = sum(1 for item in collected if item.discovery_method == "search")
+    metrics = dict(state.metrics)
+    previous_collection = metrics.get("collection", {})
+    total_candidates = int(previous_collection.get("total_candidates", 0)) + total_new
+    total_feed_candidates = int(previous_collection.get("total_feed_candidates", 0)) + feed_new
+    total_search_candidates = int(previous_collection.get("total_search_candidates", 0)) + search_new
+    metrics["collection"] = {
+        "new_candidates": total_new,
+        "new_feed_candidates": feed_new,
+        "new_search_candidates": search_new,
+        "last_pass_dynamic_discovery_share": round(search_new / total_new, 4) if total_new else 0.0,
+        "total_candidates": total_candidates,
+        "total_feed_candidates": total_feed_candidates,
+        "total_search_candidates": total_search_candidates,
+        "dynamic_discovery_share": (
+            round(total_search_candidates / total_candidates, 4) if total_candidates else 0.0
+        ),
+        "candidates_by_category": dict(counts),
+    }
     _log(
         "[collect] Done. New items: "
-        f"{total_new} (product={counts['product']}, research={counts['research']}, infra={counts['infra']})"
+        f"{total_new} (product={counts['product']}, research={counts['research']}, infra={counts['infra']}, "
+        f"dynamic_share={metrics['collection']['dynamic_discovery_share']:.2%})"
     )
     return state.model_copy(
         update={
@@ -148,6 +265,7 @@ def collect_sources(state: GraphState) -> GraphState:
             "collection_pass": state.collection_pass + 1,
             "last_collect_added": total_new,
             "last_collect_categories": sorted(list(attempted_categories)),
+            "metrics": metrics,
         }
     )
 
@@ -216,13 +334,30 @@ def evaluate_sources(state: GraphState) -> GraphState:
         )
 
         lookup_items: List[tuple[SourceItem, str]] = []
-        for item, _assessment, _category in prioritized:
+        seen_lookup_urls: set[str] = set()
+        per_category_lookup_target = min(MAX_TRENDS_PER_CATEGORY, max(1, MAX_REFERENCE_LOOKUPS // 3))
+        lookup_counts = {"product": 0, "research": 0, "infra": 0}
+        for item, _assessment, category in prioritized:
+            if len(lookup_items) >= MAX_REFERENCE_LOOKUPS:
+                break
+            if lookup_counts.get(category, 0) >= per_category_lookup_target:
+                continue
+            url_key = _normalize_url(item.url)
+            if not url_key or url_key in seen_lookup_urls:
+                continue
+            lookup_items.append((item, url_key))
+            seen_lookup_urls.add(url_key)
+            lookup_counts[category] = lookup_counts.get(category, 0) + 1
+
+        for item, _assessment, category in prioritized:
             if len(lookup_items) >= MAX_REFERENCE_LOOKUPS:
                 break
             url_key = _normalize_url(item.url)
-            if not url_key or url_key in reference_cache:
+            if not url_key or url_key in seen_lookup_urls:
                 continue
             lookup_items.append((item, url_key))
+            seen_lookup_urls.add(url_key)
+            lookup_counts[category] = lookup_counts.get(category, 0) + 1
 
         if lookup_items:
             max_workers = min(TRENDS_MAX_WORKERS, 8, len(lookup_items))
@@ -304,6 +439,10 @@ def evaluate_sources(state: GraphState) -> GraphState:
                 reference_count=reference_count,
                 trending_score=trending_score,
                 source_references=source_refs,
+                reference_source=ref_source if COMPUTE_TRENDING_SCORE else "title-group",
+                lookup_backed=_is_lookup_backed(ref_source) if COMPUTE_TRENDING_SCORE else False,
+                discovery_method=item.discovery_method,
+                discovery_query=item.discovery_query,
             )
         )
 
@@ -316,7 +455,9 @@ def evaluate_sources(state: GraphState) -> GraphState:
             continue
 
         if COMPUTE_TRENDING_SCORE:
-            if trend.trending_score > existing.trending_score:
+            if trend.lookup_backed and not existing.lookup_backed:
+                deduped[key] = trend
+            elif trend.lookup_backed == existing.lookup_backed and trend.trending_score > existing.trending_score:
                 deduped[key] = trend
         else:
             cand = (trend.published_at or datetime.min, trend.reference_count)
@@ -334,15 +475,42 @@ def evaluate_sources(state: GraphState) -> GraphState:
         )
 
     per_category_counts = {"product": 0, "research": 0, "infra": 0}
+    lookup_backed_by_category = _count_trends_by_category(
+        [trend for trend in sorted_trends if trend.lookup_backed]
+    )
     limited: List[TrendItem] = []
     for trend in sorted_trends:
         if per_category_counts.get(trend.category, 0) >= MAX_TRENDS_PER_CATEGORY:
             continue
+        if (
+            COMPUTE_TRENDING_SCORE
+            and not trend.lookup_backed
+            and lookup_backed_by_category.get(trend.category, 0) >= MAX_TRENDS_PER_CATEGORY
+        ):
+            continue
         per_category_counts[trend.category] = per_category_counts.get(trend.category, 0) + 1
         limited.append(trend)
 
+    final_lookup_backed_count = sum(1 for trend in limited if trend.lookup_backed)
+    metrics = dict(state.metrics)
+    metrics["evaluation"] = {
+        "compute_trending_score": COMPUTE_TRENDING_SCORE,
+        "assessed_count": len(trends),
+        "deduped_count": len(deduped),
+        "final_count": len(limited),
+        "final_lookup_backed_count": final_lookup_backed_count,
+        "final_lookup_coverage": final_lookup_backed_count / len(limited) if limited else 0.0,
+        "final_external_reference_coverage": final_lookup_backed_count / len(limited) if limited else 0.0,
+        "final_category_distribution": _count_trends_by_category(limited),
+        "final_dynamic_discovery_share": (
+            sum(1 for trend in limited if trend.discovery_method == "search") / len(limited) if limited else 0.0
+        ),
+        "lookup_backed_candidate_count": sum(1 for trend in sorted_trends if trend.lookup_backed),
+        "lookup_backed_candidate_distribution": lookup_backed_by_category,
+    }
+
     _log(f"[evaluate] Done. Assessed trends: {len(limited)}")
-    return state.model_copy(update={"assessed_items": limited})
+    return state.model_copy(update={"assessed_items": limited, "metrics": metrics})
 
 
 def store_results(state: GraphState) -> GraphState:
@@ -442,7 +610,7 @@ def run(lookback_days: int | None = None) -> GraphState:
     graph = build_graph().compile()
     state = GraphState(
         run_date=run_date.isoformat(),
-        lookback_days=DEFAULT_LOOKBACK_DAYS,
+        lookback_days=lookback_days if lookback_days is not None else DEFAULT_LOOKBACK_DAYS,
     )
     result = graph.invoke(state)
     # LangGraph returns a dict, convert it back to GraphState

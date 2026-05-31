@@ -36,4 +36,4 @@ Then open `http://localhost:8001` in your browser.
 
 ## Customize sources
 
-Update feed URLs or add new tools in `backend/src/trends/tools.py`.
+Update feed URLs in `backend/src/trends/curated_sources.py` or tune dynamic discovery with `DYNAMIC_DISCOVERY_ENABLED`, `DYNAMIC_DISCOVERY_PER_CATEGORY`, and `SEARCH_PROVIDER`.

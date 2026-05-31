@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urlparse
 
 import feedparser
 import requests
@@ -10,13 +10,25 @@ from langchain_core.tools import tool
 
 from .config import (
     BRAVE_SEARCH_API_KEY,
-    REFERENCE_SEARCH_DEPTH,
+    DYNAMIC_DISCOVERY_ENABLED,
+    DYNAMIC_DISCOVERY_MAX_QUERIES,
+    DYNAMIC_DISCOVERY_MAX_RESULTS_PER_QUERY,
+    DYNAMIC_DISCOVERY_MAX_TOTAL_RESULTS,
+    DYNAMIC_DISCOVERY_PER_CATEGORY,
+    DYNAMIC_DISCOVERY_SEARCH_DEPTH,
     REFERENCE_SEARCH_MAX_RESULTS,
     SEARCH_MAX_QUERY_CHARS,
+    SEARCH_PROVIDER,
     SERPAPI_API_KEY,
     TAVILY_API_KEY,
 )
-from .schemas import SourceCandidate, SourceItem
+from .schemas import (
+    Category,
+    DynamicDiscoveryMetadata,
+    DynamicDiscoveryResult,
+    SourceCandidate,
+    SourceItem,
+)
 
 DEFAULT_TIMEOUT = 20
 DEFAULT_HEADERS = {
@@ -26,6 +38,17 @@ DEFAULT_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+}
+
+DYNAMIC_DISCOVERY_EXCLUDED_DOMAINS = {
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "reddit.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
 }
 
 
@@ -107,6 +130,9 @@ def _search_tavily(query: str, max_results: int, search_depth: str = "advanced")
             SourceCandidate(
                 title=item.get("title") or item.get("url", ""),
                 url=item.get("url", ""),
+                summary=item.get("content"),
+                published_at=_parse_iso_datetime(item.get("published_date")),
+                source=urlparse(item.get("url", "")).netloc,
             )
         )
     return results
@@ -169,6 +195,8 @@ def _search_brave_references(query: str, max_results: int) -> tuple[List[SourceC
             SourceCandidate(
                 title=item.get("title") or item.get("url", ""),
                 url=item.get("url", ""),
+                summary=item.get("description"),
+                source=item.get("profile", {}).get("name") or urlparse(item.get("url", "")).netloc,
             )
         )
     try:
@@ -187,6 +215,9 @@ def _search_serpapi_references(query: str, max_results: int) -> tuple[List[Sourc
             SourceCandidate(
                 title=item.get("title") or item.get("link", ""),
                 url=item.get("link", ""),
+                summary=item.get("snippet"),
+                published_at=_parse_iso_datetime(item.get("date")),
+                source=item.get("source") or item.get("displayed_link") or urlparse(item.get("link", "")).netloc,
             )
         )
     try:
@@ -236,6 +267,205 @@ def count_references(
         "url_query": url_query,
         "title_query": title_query,
     }
+
+
+def _dynamic_query(category: Category, lookback_days: int) -> str:
+    after = (datetime.utcnow() - timedelta(days=lookback_days)).date().isoformat()
+    category_terms = {
+        "product": "technology product launch AI developer tools major update",
+        "research": "AI research breakthrough paper benchmark machine learning",
+        "infra": "cloud infrastructure chips developer platform framework release",
+    }
+    return _truncate_query(f"{category_terms[category]} after:{after}")
+
+
+def _normalize_provider(provider: Optional[str] = None) -> str:
+    normalized = (provider or SEARCH_PROVIDER or "tavily").strip().lower()
+    aliases = {
+        "brave_search": "brave",
+        "brave-search": "brave",
+        "serp": "serpapi",
+        "serp_api": "serpapi",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _search_provider_skip_reason(provider: str) -> Optional[str]:
+    if provider == "tavily":
+        return None if TAVILY_API_KEY else "TAVILY_API_KEY is not configured."
+    if provider == "brave":
+        return None if BRAVE_SEARCH_API_KEY else "BRAVE_SEARCH_API_KEY is not configured."
+    if provider == "serpapi":
+        return None if SERPAPI_API_KEY else "SERPAPI_API_KEY is not configured."
+    return f"Unsupported SEARCH_PROVIDER '{provider}'."
+
+
+def _normalize_url_key(url: str) -> str:
+    if not url:
+        return ""
+    trimmed = url.strip().lower()
+    trimmed, _ = urldefrag(trimmed)
+    if trimmed.endswith("/"):
+        trimmed = trimmed[:-1]
+    return trimmed
+
+
+def _is_excluded_dynamic_domain(url: str) -> bool:
+    domain = urlparse(url).netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return any(domain == blocked or domain.endswith(f".{blocked}") for blocked in DYNAMIC_DISCOVERY_EXCLUDED_DOMAINS)
+
+
+def _candidate_source_name(candidate: SourceCandidate, provider: str) -> str:
+    if candidate.source:
+        return candidate.source
+    domain = urlparse(candidate.url).netloc
+    return domain or f"Dynamic Search ({provider})"
+
+
+def _search_candidates(query: str, max_results: int, provider: Optional[str] = None) -> List[SourceCandidate]:
+    provider_name = _normalize_provider(provider)
+    if provider_name == "brave":
+        results, _total = _search_brave_references(query, max_results)
+        return results
+    if provider_name == "serpapi":
+        results, _total = _search_serpapi_references(query, max_results)
+        return results
+    if provider_name == "tavily":
+        return _search_tavily(query, max_results, search_depth=DYNAMIC_DISCOVERY_SEARCH_DEPTH)
+    raise RuntimeError(f"Unsupported SEARCH_PROVIDER '{provider_name}'.")
+
+
+def _bounded_discovery_metadata(
+    enabled: bool,
+    provider: str,
+    requested_queries: int,
+    max_queries: int,
+    max_results_per_query: int,
+    max_total_results: int,
+    skipped_reason: Optional[str] = None,
+) -> DynamicDiscoveryMetadata:
+    return DynamicDiscoveryMetadata(
+        enabled=enabled,
+        provider=provider,
+        requested_queries=requested_queries,
+        max_queries=max_queries,
+        max_results_per_query=max_results_per_query,
+        max_total_results=max_total_results,
+        skipped_reason=skipped_reason,
+    )
+
+
+def _discover_trending_candidates(
+    category: Category,
+    lookback_days: int,
+    max_results: int,
+    queries: Optional[List[str]] = None,
+    provider: Optional[str] = None,
+) -> DynamicDiscoveryResult:
+    provider_name = _normalize_provider(provider)
+    raw_queries = queries or [_dynamic_query(category, lookback_days)]
+    max_queries = max(1, DYNAMIC_DISCOVERY_MAX_QUERIES)
+    max_results_per_query = max(1, min(max_results, DYNAMIC_DISCOVERY_MAX_RESULTS_PER_QUERY))
+    max_total_results = max(1, min(max_results, DYNAMIC_DISCOVERY_MAX_TOTAL_RESULTS))
+
+    metadata = _bounded_discovery_metadata(
+        enabled=DYNAMIC_DISCOVERY_ENABLED,
+        provider=provider_name,
+        requested_queries=len(raw_queries),
+        max_queries=max_queries,
+        max_results_per_query=max_results_per_query,
+        max_total_results=max_total_results,
+    )
+
+    if not DYNAMIC_DISCOVERY_ENABLED:
+        metadata.skipped_reason = "DYNAMIC_DISCOVERY_ENABLED is false."
+        return DynamicDiscoveryResult(metadata=metadata)
+
+    skip_reason = _search_provider_skip_reason(provider_name)
+    if skip_reason:
+        metadata.skipped_reason = skip_reason
+        return DynamicDiscoveryResult(metadata=metadata)
+
+    bounded_queries = []
+    seen_queries: set[str] = set()
+    for raw_query in raw_queries:
+        query = _truncate_query(raw_query.strip())
+        if not query or query in seen_queries:
+            continue
+        seen_queries.add(query)
+        bounded_queries.append(query)
+        if len(bounded_queries) >= max_queries:
+            break
+
+    metadata.requested_queries = len(raw_queries)
+    discovered: List[SourceItem] = []
+    seen_urls: set[str] = set()
+    seen_titles: set[str] = set()
+
+    for query in bounded_queries:
+        if len(discovered) >= max_total_results:
+            break
+        remaining = max_total_results - len(discovered)
+        query_limit = min(max_results_per_query, remaining)
+        try:
+            candidates = _search_candidates(query, query_limit, provider=provider_name)
+            metadata.executed_queries += 1
+        except Exception as exc:
+            metadata.errors.append(f"{query}: {exc}")
+            continue
+
+        for rank, candidate in enumerate(candidates, start=1):
+            if len(discovered) >= max_total_results:
+                break
+            if not candidate.url:
+                continue
+            if _is_excluded_dynamic_domain(candidate.url):
+                continue
+            url_key = _normalize_url_key(candidate.url)
+            title_key = candidate.title.strip().lower()
+            if (url_key and url_key in seen_urls) or (title_key and title_key in seen_titles):
+                continue
+            if url_key:
+                seen_urls.add(url_key)
+            if title_key:
+                seen_titles.add(title_key)
+            discovered.append(
+                SourceItem(
+                    title=candidate.title or candidate.url,
+                    url=candidate.url,
+                    published_at=candidate.published_at,
+                    source=_candidate_source_name(candidate, provider_name),
+                    summary=candidate.summary,
+                    category=category,
+                    discovery_method="search",
+                    discovery_query=query,
+                    discovery_provider=provider_name,
+                    discovery_rank=rank,
+                )
+            )
+
+    metadata.result_count = len(discovered)
+    metadata.dynamic_discovery_count = len(discovered)
+    return DynamicDiscoveryResult(items=discovered, metadata=metadata)
+
+
+@tool
+def discover_trending_candidates(
+    category: Category,
+    lookback_days: int = 3,
+    max_results: int = DYNAMIC_DISCOVERY_PER_CATEGORY,
+    queries: Optional[List[str]] = None,
+) -> List[dict]:
+    """Discover recent technology trend candidates via the configured search provider."""
+    result = _discover_trending_candidates(
+        category=category,
+        lookback_days=lookback_days,
+        max_results=max_results,
+        queries=queries,
+    )
+    return [item.model_dump() for item in result.items]
 
 
 @tool
