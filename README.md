@@ -14,6 +14,10 @@ The static site lives in `docs/` and can be published via GitHub Pages.
 
 See `backend/README.md` for setup instructions.
 
+## Scheduled workflows
+
+The weekly GitHub Actions pipelines update `.github/heartbeat/*.json` after successful runs and commit the heartbeat back to the active branch. This keeps repository activity visible while the GitHub Pages front-end remains in active use.
+
 ## Data flow
 
 1. LangGraph agents collect and assess trends.

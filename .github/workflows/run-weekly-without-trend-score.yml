@@ -5,6 +5,9 @@ on:
     - cron: "23 9 * * 5" # Fridays at 09:23 UTC (4 days after Monday)
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -30,3 +33,38 @@ jobs:
           BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           PYTHONUNBUFFERED: "1"
         run: python backend/run.py
+      - name: Update heartbeat
+        env:
+          HEARTBEAT_FILE: .github/heartbeat/run-weekly-without-trend-score.json
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+
+          path = os.environ["HEARTBEAT_FILE"]
+          os.makedirs(os.path.dirname(path), exist_ok=True)
+
+          def github_int(name):
+              value = os.environ.get(name, "")
+              return int(value) if value.isdigit() else value
+
+          payload = {
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "last_success_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+              "run_id": github_int("GITHUB_RUN_ID"),
+              "run_number": github_int("GITHUB_RUN_NUMBER"),
+              "ref_name": os.environ["GITHUB_REF_NAME"],
+              "sha": os.environ["GITHUB_SHA"],
+          }
+
+          with open(path, "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2)
+              handle.write("\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$HEARTBEAT_FILE"
+          git commit -m "Update ${GITHUB_WORKFLOW} heartbeat"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
