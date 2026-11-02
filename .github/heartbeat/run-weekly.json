@@ -1,8 +1,8 @@
 {
   "workflow": "Run trends pipeline (weekly scoring)",
-  "last_success_at": "2026-10-26T16:13:36.204698Z",
-  "run_id": 40356833218,
-  "run_number": 31,
+  "last_success_at": "2026-11-02T19:38:19.746069Z",
+  "run_id": 41511612910,
+  "run_number": 32,
   "ref_name": "main",
-  "sha": "27829901d95d05dbdeeed74f3e0141753e35f557"
+  "sha": "1c3f4a3d4290e3bc7d716055a1f04c2b34471ad2"
 }
